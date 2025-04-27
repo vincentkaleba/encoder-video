@@ -559,9 +559,9 @@ class VideoClient:
         return None
 
     async def generate_thumbnail(self, input_path: Union[str, Path],
-                               output_name: str,
-                               time_offset: str = "00:00:05",
-                               width: int = 320) -> Optional[Path]:
+                                output_name: str,
+                                time_offset: str = "00:00:05",
+                                width: int = 640) -> Optional[Path]:
         """
         Generate a thumbnail from a video file.
         
@@ -575,7 +575,7 @@ class VideoClient:
             Path to generated thumbnail or None if failed
         """
         input_path = Path(input_path)
-        output_path = self.output_path / f"{output_name}.jpg"
+        output_path = self.output_path / f"{output_name}.png"  
         
         command = [
             self.ffmpeg_path,
@@ -583,14 +583,17 @@ class VideoClient:
             "-ss", time_offset,
             "-vframes", "1",
             "-vf", f"scale={width}:-1",
-            "-y",  # Overwrite without asking
+            "-q:v", "2",  
+            "-y", 
             str(output_path)
         ]
         
         self.logger.info(f"Generating thumbnail for {input_path.name} at {time_offset}")
+        
         if await self._run_ffmpeg_command(command):
             return output_path
         return None
+
     
     async def add_subtitle(self, sbt_file: Union[str, Path], 
                             input_path: Union[str, Path],
@@ -719,14 +722,14 @@ class VideoClient:
         return None
 
     async def merge_video_audio(self, video_path: Union[str, Path],
-                              audio_path: Union[str, Path],
-                              output_name: str) -> Optional[Path]:
+                            audio_path: Union[str, Path],
+                            output_name: str) -> Optional[Path]:
         """
-        Merge a video file with an audio file.
+        Merge a video file with an audio file, first removing any existing audio streams.
         
         Args:
-            video_path: Path to video file (without audio or to replace audio)
-            audio_path: Path to audio file
+            video_path: Path to video file
+            audio_path: Path to audio file to merge
             output_name: Name for output file (without extension)
             
         Returns:
@@ -735,6 +738,7 @@ class VideoClient:
         video_path = Path(video_path)
         audio_path = Path(audio_path)
         
+        # Validation des fichiers
         if not video_path.exists():
             self.logger.error(f"Video file not found: {video_path}")
             return None
@@ -749,18 +753,26 @@ class VideoClient:
             self.ffmpeg_path,
             "-i", str(video_path),
             "-i", str(audio_path),
-            "-map", "0:v",  
-            "-map", "1:a",  
-            "-c:v", "copy",  
-            "-c:a", "aac",  
-            "-shortest",  
-            "-y",
+            "-map", "0:v",
+            "-map", "1:a",      
+            "-c:v", "copy",    
+            "-c:a", "aac",
+            "-b:a", "192k",     
+            "-shortest",        
+            "-y",               
             str(output_path)
         ]
         
-        self.logger.info(f"Merging {video_path.name} with {audio_path.name}")
-        if await self._run_ffmpeg_command(command):
-            return output_path
+        self.logger.info(f"Replacing audio in {video_path.name} with {audio_path.name}")
+        
+        try:
+            if await self._run_ffmpeg_command(command):
+                if output_path.exists() and output_path.stat().st_size > 0:
+                    return output_path
+                self.logger.error("Output file creation failed (empty or missing)")
+        except Exception as e:
+            self.logger.error(f"Error during audio merge: {str(e)}")
+        
         return None
     
     async def remove_audio(self, input_path: Union[str, Path],
@@ -1636,3 +1648,66 @@ class VideoClient:
             
         except Exception as e:
             self.logger.error(f"Quality verification failed: {str(e)}")
+    
+    async def split_video(self, input_path: Union[str, Path],
+                        output_name: str,
+                        cut_ranges: List[Tuple[float, float]]) -> Optional[List[Path]]:
+        """
+        Split a video into multiple segments based on specified time ranges.
+        
+        Args:
+            input_path: Path to input video file
+            output_name: Base name for output files
+            cut_ranges: List of (start, end) time ranges to split (in seconds)
+            
+        Returns:
+            List of paths to split video files, or None if failed
+        """
+        input_path = Path(input_path)
+        if not input_path.exists():
+            self.logger.error(f"Input file not found: {input_path}")
+            return None
+
+        # Sort and merge overlapping ranges
+        cut_ranges.sort()
+        merged_ranges = []
+        for current in cut_ranges:
+            if not merged_ranges:
+                merged_ranges.append(current)
+            else:
+                last = merged_ranges[-1]
+                if current[0] <= last[1]:
+                    new_last = (last[0], max(last[1], current[1]))
+                    merged_ranges[-1] = new_last
+                else:
+                    merged_ranges.append(current)
+
+        media_info = await self.get_media_info(input_path)
+        duration = media_info.duration if media_info else float('inf')
+
+        output_files = []
+
+        for i, (start, end) in enumerate(merged_ranges):
+            if start >= duration or end > duration:
+                self.logger.error("Start or end time exceeds video duration")
+                continue
+
+            output_ext = input_path.suffix
+            output_path = self.output_path / f"{output_name}_part{i+1}{output_ext}"
+
+            command = [
+                self.ffmpeg_path,
+                "-i", str(input_path),
+                "-ss", str(start),
+                "-to", str(end),
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-y",
+                str(output_path)
+            ]
+
+            self.logger.info(f"Splitting {input_path.name} from {start}s to {end}s")
+            if await self._run_ffmpeg_command(command):
+                output_files.append(output_path)
+
+        return output_files if output_files else None
