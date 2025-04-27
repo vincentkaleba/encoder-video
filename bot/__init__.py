@@ -16,7 +16,7 @@ class Dependencies:
         self.mongo = MongoDB(self.config.MONGO_URI, "videoclient_log")
         
         # self.user_manager = UserManager(self.mongo)  
-        self.videoclient = VideoClient("test", out_pth="test", trd=100)  
+        self.videoclient = VideoClient("test", out_pth="downloads", trd=100)  
         
         self.bot: Optional['Bot'] = None
     

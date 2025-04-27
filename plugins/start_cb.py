@@ -93,7 +93,7 @@ async def audio_menu(client: Client, callback_query: CallbackQuery):
             InlineKeyboardButton("🔊 Sélection Audio", callback_data="audio_selection")
         ],
         [
-            InlineKeyboardButton("🔄 Convertir Audio", callback_data="convert_audio"),
+            InlineKeyboardButton("🔄 Convertir en Audio", callback_data="convert_audio"),
             InlineKeyboardButton("🔇 Supprimer Audio", callback_data="remove_audio")
         ],
         [

@@ -315,7 +315,7 @@ class VideoClient:
         self.executor.shutdown(wait=False)
         self.logger.info("Client shutdown complete")
         
-    async def _run_ffmpeg_command(self, command: List[str], timeout: int = 300) -> bool:
+    async def _run_ffmpeg_command(self, command: List[str], timeout: int = 3600) -> bool:
         """
         Run an FFmpeg command asynchronously with timeout.
         
@@ -477,6 +477,7 @@ class VideoClient:
             self.logger.error(f"Unexpected error analyzing {path.name}: {str(e)}")
             
         return None
+    
 
     async def extract_subtitles(self, input_path: Union[str, Path],
                               output_dir: Union[str, Path] = None) -> List[Path]:

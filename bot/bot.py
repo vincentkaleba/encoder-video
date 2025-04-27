@@ -2,6 +2,7 @@ from pyrogram import Client
 import logging
 from typing import TYPE_CHECKING
 from data.base import MongoDB
+import pyromod
 
 if TYPE_CHECKING:
     from config import Config
