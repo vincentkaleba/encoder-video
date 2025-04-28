@@ -1,5 +1,6 @@
 import asyncio
 from asyncio import subprocess
+import re
 import subprocess 
 import io
 import json
@@ -1120,7 +1121,7 @@ class VideoClient:
     
     async def get_chapters(self, input_path: Union[str, Path]) -> Optional[List[Dict[str, Any]]]:
         """
-        Extract chapter information from a media file.
+        Extract chapter information from a media file (compatible with older FFmpeg versions).
         
         Args:
             input_path: Path to input media file
@@ -1134,13 +1135,13 @@ class VideoClient:
             self.logger.error(f"Input file not found: {input_path}")
             return None
 
+        # Commande compatible avec les anciennes versions de FFmpeg
         command = [
             self.ffmpeg_path,
             "-i", str(input_path),
-            "-print_format", "json",
-            "-show_chapters",
-            "-loglevel", "error",
-            "-"
+            "-f", "ffmetadata",
+            "-",
+            "-loglevel", "error"
         ]
 
         try:
@@ -1156,16 +1157,60 @@ class VideoClient:
                 self.logger.error(f"Failed to get chapters: {stderr.decode().strip()}")
                 return None
 
-            chapters = json.loads(stdout.decode()).get('chapters', [])
+            metadata = stdout.decode()
+            if not metadata:
+                self.logger.info(f"No chapters found in {input_path.name}")
+                return None
+
+            # Parser le format ffmetadata
+            chapters = []
+            current_chapter = {}
+            for line in metadata.split('\n'):
+                line = line.strip()
+                if line.startswith('[CHAPTER]'):
+                    if current_chapter:
+                        chapters.append(current_chapter)
+                    current_chapter = {}
+                elif line.startswith('START='):
+                    current_chapter['start'] = line[6:]
+                elif line.startswith('END='):
+                    current_chapter['end'] = line[4:]
+                elif line.startswith('title='):
+                    current_chapter['title'] = line[6:]
+
+            if current_chapter:
+                chapters.append(current_chapter)
+
             if not chapters:
                 self.logger.info(f"No chapters found in {input_path.name}")
                 return None
+
+            for chap in chapters:
+                if 'start' in chap:
+                    chap['start'] = self._convert_timestamp(chap['start'])
+                if 'end' in chap:
+                    chap['end'] = self._convert_timestamp(chap['end'])
 
             return chapters
             
         except Exception as e:
             self.logger.error(f"Error getting chapters: {str(e)}")
             return None
+
+    @staticmethod
+    def _convert_timestamp(timestamp: str) -> str:
+        """Convert FFmpeg timestamp to HH:MM:SS format."""
+        try:
+            if re.match(r'^\d{2}:\d{2}:\d{2}\.\d+$', timestamp):
+                return timestamp.split('.')[0]  
+            
+            seconds = float(timestamp)
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            secs = int(seconds % 60)
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        except:
+            return timestamp  
 
     async def get_chapter(self, input_path: Union[str, Path], chapter_index: int) -> Optional[Dict[str, Any]]:
         """

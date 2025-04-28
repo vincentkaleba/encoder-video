@@ -1,5 +1,8 @@
 import asyncio
+import json
 import os
+import re
+import shutil
 import time
 from typing import Dict
 from pyrogram import Client, filters
@@ -2102,6 +2105,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 
         finally:
             try:
+
                 if os.path.exists(input_path):
                     os.remove(input_path)
                 if 'result' in locals() and os.path.exists(result):
@@ -2118,6 +2122,13 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 print(f"Erreur de nettoyage: {str(e)}")
     
     elif data in ["add_chapters", "edit_chapter", "split_chapter", "remove_chapters", "get_chapters", "get_chapter"]:
+        # Variables à nettoyer
+        input_path = None
+        result = None
+        chapter_file = None
+        response = None
+        status_msg = None
+        
         try:
             await callback_query.answer("⏳ Traitement des chapitres en cours...")
             
@@ -2164,6 +2175,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             except Exception as e:
                 await status_msg.edit(f"❌ Erreur de téléchargement: {str(e)}")
                 return
+
+            await file_msg.delete()
             
             # Initialisation du client vidéo
             videoclient = deps.videoclient
@@ -2230,7 +2243,18 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 
             elif data == "add_chapters":
                 # Ajout de chapitres
-                await status_msg.edit("📝 Veuillez envoyer le fichier de chapitres (JSON/TXT)...")
+                await status_msg.edit(
+                    "📝 Veuillez envoyer le fichier de chapitres (JSON/TXT)...\n\n"
+                    "Format JSON attendu :\n"
+                    "[\n"
+                    "  {\"start\": \"00:00:00\", \"end\": \"00:01:00\", \"title\": \"Chapitre 1\"},\n"
+                    "  {\"start\": \"00:01:00\", \"end\": \"00:02:00\", \"title\": \"Chapitre 2\"}\n"
+                    "]\n\n"
+                    "Format texte simple :\n"
+                    "00:00:00 Chapitre 1\n"
+                    "00:01:00 Chapitre 2\n\n"
+                    "Tapez /cancel pour annuler"
+                )
                 try:
                     chapter_msg = await client.listen(
                         filters=filters.document & filters.user(user.id),
@@ -2241,26 +2265,42 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                         file_name=f"{user_dir}/chapters{Path(chapter_msg.document.file_name).suffix}"
                     )
                     
-                    # Parser le fichier de chapitres
-                    if Path(chapter_file).suffix == '.json':
-                        with open(chapter_file) as f:
-                            chapters_data = json.load(f)
-                        chapters = chapters_data.get('chapters', [])
-                    else:  # Format texte simple
-                        with open(chapter_file) as f:
-                            lines = [line.strip() for line in f if line.strip()]
-                        chapters = []
-                        for line in lines:
-                            parts = line.split(maxsplit=1)
-                            if len(parts) == 2:
+                    # Validation et parsing des chapitres
+                    chapters = []
+                    try:
+                        if Path(chapter_file).suffix == '.json':
+                            with open(chapter_file) as f:
+                                chapters_data = json.load(f)
+                            if not isinstance(chapters_data, list):
+                                raise ValueError("Format JSON invalide - liste attendue")
+                            chapters = chapters_data
+                        else:  # Format texte simple
+                            with open(chapter_file) as f:
+                                lines = [line.strip() for line in f if line.strip()]
+                            prev_time = "00:00:00"
+                            for i, line in enumerate(lines, 1):
+                                parts = line.split(maxsplit=1)
+                                if len(parts) != 2:
+                                    raise ValueError(f"Ligne {i} invalide - format 'HH:MM:SS Titre' attendu")
+                                
+                                current_time = parts[0]
+                                # Validation du format temporel
+                                if not re.match(r'^\d{2}:\d{2}:\d{2}$', current_time):
+                                    raise ValueError(f"Format temporel invalide à la ligne {i}")
+                                
                                 chapters.append({
-                                    'start': parts[0],
-                                    'end': '',  # À calculer
+                                    'start': prev_time,
+                                    'end': current_time,
                                     'title': parts[1]
                                 })
+                                prev_time = current_time
+                    
+                    except Exception as e:
+                        await status_msg.edit(f"❌ Erreur dans le fichier de chapitres: {str(e)}")
+                        return
                     
                     if not chapters:
-                        await status_msg.edit("❌ Format de chapitres invalide")
+                        await status_msg.edit("❌ Aucun chapitre valide trouvé dans le fichier")
                         return
                         
                     output_name = f"with_chapters_{int(time.time())}"
@@ -2342,7 +2382,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     )
                     
                     if not result:
-                        await status_msg.edit("❌ Échec de la modification du chapitre")
+                        await status_msg.edit("❌ Échec de la modification du chapitre : veiller entrer les valeurs correctes au format demandé")
                         return
                         
                     await client.send_video(
@@ -2421,15 +2461,18 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             await status_msg.delete()
             
         except Exception as e:
-            await msg.edit(f"❌ Erreur: {str(e)}")
+            if status_msg:
+                await status_msg.edit(f"❌ Erreur: {str(e)}")
+            else:
+                await msg.edit(f"❌ Erreur: {str(e)}")
         finally:
             # Nettoyage des fichiers temporaires
             try:
-                if 'input_path' in locals() and os.path.exists(input_path):
+                if input_path and os.path.exists(input_path):
                     os.remove(input_path)
-                if 'result' in locals() and result and os.path.exists(result):
+                if result and os.path.exists(result):
                     os.remove(result)
-                if 'chapter_file' in locals() and chapter_file and os.path.exists(chapter_file):
+                if chapter_file and os.path.exists(chapter_file):
                     os.remove(chapter_file)
                 if os.path.exists(user_dir):
                     shutil.rmtree(user_dir)
