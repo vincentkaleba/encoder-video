@@ -36,9 +36,6 @@ async def progress_for_pyrogram(current: int, total: int, ud_type: str, message,
 
             await message.edit_text(
                 text=f"{ud_type}\n\n{progress_bar}\n\n{progress_text}",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("❌ Annuler", callback_data=f"close_{progress_id or ''}")]]
-                ),
             )
         except Exception as e:
             print(f"Erreur lors de la mise à jour de la progression : {e}")

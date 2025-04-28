@@ -2,6 +2,7 @@ requests>=2.25.0
 aiohttp>=3.7.0
 tqdm>=4.0.0
 psutil>=5.8.0
+python-magic>=0.4.27
 
 colorama>=0.4.4
 prompt-toolkit>=3.0.0

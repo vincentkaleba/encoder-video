@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
+import magic  # Ensure you have python-magic installed
 from typing import Optional, List, Dict, Tuple, Callable, Union, Any, Iterator
 
 
@@ -594,31 +595,44 @@ class VideoClient:
             return output_path
         return None
 
-    
-    async def add_subtitle(self, sbt_file: Union[str, Path], 
-                            input_path: Union[str, Path],
-                            output_name: str, 
-                            language: str = "eng", 
-                            index: int = 1,
-                            is_default: bool = False,
-                            is_forced: bool = False) -> Optional[Path]:
+
+    async def add_subtitle(self, sbt_file: Union[str, Path],  
+                        input_path: Union[str, Path],
+                        output_name: str, 
+                        language: str = "eng", 
+                        index: int = 0,
+                        is_default: bool = True,
+                        is_forced: bool = False) -> Optional[Path]:
         """
-        Add a subtitle track to a video file with proper ASS support without desynchronization.
+        Add subtitles with smart fallback:
+        - Detect MIME type to determine correct handling
+        - Try softsub first (for supported containers)
+        - Fallback to hardsub if softsub fails
         """
         sbt_path = Path(sbt_file)
         input_path = Path(input_path)
-        
+        output_path = self.output_path / f"{output_name}{input_path.suffix}"
+
+        # Validate files
         if not sbt_path.exists():
-            self.logger.error(f"Subtitle file not found: {sbt_file}")
+            self.logger.error(f"Subtitle file not found: {sbt_path}")
             return None
         if not input_path.exists():
             self.logger.error(f"Input video not found: {input_path}")
             return None
 
-        sbt_ext = sbt_path.suffix.lower()[1:]  # Remove dot
-        output_ext = input_path.suffix
-        output_path = self.output_path / f"{output_name}{output_ext}"
+        # Detect real MIME types
+        mime = magic.Magic(mime=True)
+        input_mime = mime.from_file(str(input_path))
+        sbt_mime = mime.from_file(str(sbt_path))
 
+        self.logger.debug(f"Detected input MIME: {input_mime}")
+        self.logger.debug(f"Detected subtitle MIME: {sbt_mime}")
+
+        input_ext = input_path.suffix.lower()
+        sbt_ext = sbt_path.suffix.lower()[1:]
+
+        # Prepare metadata flags
         disposition = []
         if is_default:
             disposition.append("default")
@@ -626,30 +640,129 @@ class VideoClient:
             disposition.append("forced")
         disposition_str = "+".join(disposition) if disposition else "0"
 
-        command = [
+        # Smart compatibility check
+        softsub_supported = False
+
+        if input_mime in ("video/x-matroska", "video/webm"):
+            softsub_supported = True
+        elif input_mime == "video/mp4":
+            if sbt_ext in ("srt", "vtt"): 
+                softsub_supported = True
+            else:
+                softsub_supported = False
+
+        if softsub_supported:
+            try:
+                sub_codec = {
+                    "ass": "ass",
+                    "ssa": "ass",
+                    "srt": "mov_text" if input_ext == ".mp4" else "srt",
+                    "vtt": "mov_text" if input_ext == ".mp4" else "webvtt"
+                }.get(sbt_ext, "mov_text" if input_ext == ".mp4" else "srt")
+
+                command = [
+                    self.ffmpeg_path,
+                    "-i", str(input_path),
+                    "-i", str(sbt_path),
+                    "-map", "0",    
+                    "-map", "1:0",  
+                    "-c:v", "copy",
+                    "-c:a", "copy",
+                    "-c:s", sub_codec,
+                    f"-metadata:s:s:{index}", f"language={language}",
+                    f"-disposition:s:{index}", disposition_str,
+                    "-y",
+                    str(output_path)
+                ]
+
+                self.logger.info(f"Attempting softsub for {input_path.name}")
+                if await self._run_ffmpeg_command(command):
+                    return output_path
+
+            except Exception as e:
+                self.logger.warning(f"Softsub failed, falling back to hardsub: {str(e)}")
+
+        # Hardsub fallback
+        try:
+            # Convert VTT to SRT if needed
+            if sbt_ext == "vtt":
+                converted_sbt = sbt_path.with_suffix(".srt")
+                if not await self._convert_vtt_to_srt(sbt_path, converted_sbt):
+                    self.logger.error("VTT to SRT conversion failed")
+                    return None
+                sbt_path = converted_sbt
+                sbt_ext = "srt"
+
+            # Escape paths correctly
+            sub_path = str(sbt_path).replace("'", "'\\''") if sys.platform != "win32" else str(sbt_path)
+
+            command = [
+                self.ffmpeg_path,
+                "-i", str(input_path),
+                "-vf", f"subtitles='{sub_path}'" if sys.platform != "win32" else f"subtitles=\"{sub_path}\"",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                "-y",
+                str(output_path)
+            ]
+
+            self.logger.info(f"Attempting hardsub for {input_path.name}")
+            if await self._run_ffmpeg_command(command):
+                return output_path
+
+            # Fallback if audio copy failed (re-encode audio)
+            command[command.index("-c:a") + 1] = "aac"
+            command.insert(command.index("-c:a") + 2, "-b:a")
+            command.insert(command.index("-b:a") + 1, "192k")
+
+            if await self._run_ffmpeg_command(command):
+                return output_path
+
+        except Exception as e:
+            self.logger.error(f"Hardsub failed: {str(e)}")
+            return None
+
+        return None
+
+
+
+    async def _convert_vtt_to_srt(self, vtt_path: Path, srt_path: Path) -> bool:
+        """Convert VTT subtitles to SRT format"""
+        try:
+            command = [
+                self.ffmpeg_path,
+                "-i", str(vtt_path),
+                "-f", "srt",
+                "-y",
+                str(srt_path)
+            ]
+            return await self._run_ffmpeg_command(command)
+        except Exception as e:
+            self.logger.error(f"VTT to SRT conversion failed: {str(e)}")
+            return False
+    
+    async def convert_container(self, input_path: Path, output_name: str, output_format: MediaType) -> Optional[Path]:
+        """Convertit un fichier multimédia dans un autre conteneur sans ré-encoder"""
+        output_path = self.output_path / f"{output_name}{output_format.value}"
+        
+        cmd = [
             self.ffmpeg_path,
             "-i", str(input_path),
-            "-i", str(sbt_path),
-            "-map", "0:v",  # map video
-            "-map", "0:a",  # map audio
-            "-map", "1:0",  # map new subtitle
-            "-c:v", "copy",  # copy video
-            "-c:a", "copy",  # copy audio
-            "-c:s", "ass" if sbt_ext in ("ass", "ssa") else "mov_text",  # reencode subtitle properly
-            "-disposition:s:0", f"{disposition_str}",
-            "-metadata:s:s:0", f"language={language}",
-            "-y",  # overwrite output
+            "-c", "copy", 
+            "-y",  
             str(output_path)
         ]
-
-        self.logger.info(f"Adding {sbt_ext.upper()} subtitle to {input_path.name}")
-        if await self._run_ffmpeg_command(command):
+        
+        if await self._run_ffmpeg_command(cmd):
             return output_path
         return None
 
 
     async def remove_subtitles(self, input_path: Union[str, Path],
-                             output_name: str) -> Optional[Path]:
+                            output_name: str) -> Optional[Path]:
         """
         Remove all subtitle tracks from a video file.
         
@@ -665,7 +778,7 @@ class VideoClient:
             self.logger.error(f"Input video not found: {input_path}")
             return None
             
-        output_ext = input_path.suffix
+        output_ext = ".mkv" if input_path.suffix.lower() == ".mkv" else input_path.suffix
         output_path = self.output_path / f"{output_name}{output_ext}"
         
         command = [
@@ -673,6 +786,7 @@ class VideoClient:
             "-i", str(input_path),
             "-map", "0",
             "-map", "-0:s",  
+            "-map", "-0:t",  
             "-c", "copy",
             "-y",
             str(output_path)
@@ -872,6 +986,69 @@ class VideoClient:
         ]
         
         self.logger.info(f"Selecting subtitle track {selected_sub.index} from {input_path.name}")
+        if await self._run_ffmpeg_command(command):
+            return output_path
+        return None
+    
+    async def choose_subtitle_burn(self, input_path: Union[str, Path],
+                                output_name: str,
+                                language: Optional[str] = None,
+                                index: Optional[int] = None) -> Optional[Path]:
+        """
+        Burn selected subtitle track into the video (hardcoded).
+        
+        Args:
+            input_path: Path to input video file
+            output_name: Name for output file (without extension)
+            language: Language code to select (ISO 639)
+            index: Specific subtitle track index to select
+                    
+        Returns:
+            Path to the output file with burned subtitles, or None if failed
+        """
+        input_path = Path(input_path)
+        if not input_path.exists():
+            self.logger.error(f"Input video not found: {input_path}")
+            return None
+            
+        if language is None and index is None:
+            self.logger.error("Must specify either language or index")
+            return None
+            
+        # Get media info to find subtitle tracks
+        media_info = await self.get_media_info(input_path)
+        if not media_info or not media_info.subtitle_tracks:
+            self.logger.info(f"No subtitles found in {input_path.name}")
+            return None
+            
+        # Find matching subtitle track
+        selected_sub = None
+        if index is not None:
+            selected_sub = next((s for s in media_info.subtitle_tracks if s.index == index), None)
+        elif language is not None:
+            selected_sub = next((s for s in media_info.subtitle_tracks if s.language.lower() == language.lower()), None)
+            
+        if not selected_sub:
+            self.logger.error(f"No matching subtitle track found (language={language}, index={index})")
+            return None
+            
+        output_ext = input_path.suffix
+        output_path = self.output_path / f"{output_name}{output_ext}"
+        
+        # Command to burn subtitles into video (more reliable method)
+        command = [
+            self.ffmpeg_path,
+            "-i", str(input_path),
+            "-vf", f"subtitles='{input_path}':si={selected_sub.index}",
+            "-c:a", "copy",
+            "-c:v", "libx264",
+            "-crf", "23",
+            "-preset", "fast",
+            "-y",
+            str(output_path)
+        ]
+        
+        self.logger.info(f"Burning subtitle track {selected_sub.index} ({selected_sub.language}) into {input_path.name}")
         if await self._run_ffmpeg_command(command):
             return output_path
         return None
@@ -1443,10 +1620,10 @@ class VideoClient:
     RESOLUTION_PROFILES = {
         '144p': {
             'scale': 144,
-            'video_bitrate': (150, 300),  # kbps (min, max)
+            'video_bitrate': (150, 300),  
             'audio_bitrate': '64k',
             'min_size_mb': 5,
-            'crf': 32  # Qualité CRF (plus bas = meilleure qualité)
+            'crf': 32  
         },
         '240p': {
             'scale': 240,
@@ -1490,8 +1667,8 @@ class VideoClient:
             'video_codec': 'libx264',
             'audio_codec': 'aac',
             'extension': 'mp4',
-            'preset': 'slow',  # Meilleure compression
-            'tune': 'film',    # Optimisation pour contenu vidéo
+            'preset': 'slow',  
+            'tune': 'film',   
             'profile': 'high',
             'level': '4.0',
             'container_options': ['-movflags', '+faststart']
@@ -1501,7 +1678,7 @@ class VideoClient:
             'audio_codec': 'aac',
             'extension': 'mp4',
             'preset': 'medium',
-            'tune': 'ssim',    # Optimisation pour qualité visuelle
+            'tune': 'ssim',    
             'profile': 'main10',
             'container_options': ['-tag:v', 'hvc1']
         },
@@ -1509,9 +1686,9 @@ class VideoClient:
             'video_codec': 'libvpx-vp9',
             'audio_codec': 'libopus',
             'extension': 'webm',
-            'speed': 2,        # Bon compromis vitesse/qualité
+            'speed': 2,        
             'quality': 'good',
-            'row-mt': 1        # Multi-threading
+            'row-mt': 1        
         },
         'mkv': {  
             'video_codec': 'libx264',
@@ -1711,3 +1888,4 @@ class VideoClient:
                 output_files.append(output_path)
 
         return output_files if output_files else None
+    

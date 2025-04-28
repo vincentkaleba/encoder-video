@@ -31,7 +31,7 @@ def main_menu():
             InlineKeyboardButton("📝 Sous-titres", callback_data="subs_menu1")
         ],
         [
-            InlineKeyboardButton("🛠 Outils", callback_data="tools_menu1"),
+            InlineKeyboardButton("📌 Chapitres", callback_data="tools_menu1"),
             InlineKeyboardButton("ℹ️ Infos", callback_data="info_menu")
         ],
         [
@@ -89,7 +89,7 @@ def subs_menu1():
             InlineKeyboardButton("🗑 Supprimer Sous-titres", callback_data="remove_subtitles")
         ],
         [
-            InlineKeyboardButton("🌐 Langue Sous-titres", callback_data="subtitle_language"),
+            InlineKeyboardButton("🌐 Sous-titres permanents", callback_data="choose_subtitle_burn"),
             InlineKeyboardButton("🏷 Forcer Sous-titres", callback_data="force_subtitle")
         ],
         [
@@ -100,25 +100,29 @@ def subs_menu1():
 def tools_menu1():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔄 Convertir", callback_data="convert"),
-            InlineKeyboardButton("⏱ Tronquer", callback_data="trim")
+            InlineKeyboardButton("➕ Ajouter Chapitres", callback_data="add_chapters"),
+            InlineKeyboardButton("✏️ Modifier Chapitre", callback_data="edit_chapter")
         ],
         [
-            InlineKeyboardButton("🖼 Miniature", callback_data="thumbnail"),
-            InlineKeyboardButton("🔙 Retour", callback_data="main_menu")
-        ]
+            InlineKeyboardButton("✂️ Diviser Chapitre", callback_data="split_chapter"),
+            InlineKeyboardButton("🗑 Supprimer Chapitres", callback_data="remove_chapters")
+        ],
+        [
+            InlineKeyboardButton("📋 Lister Chapitres", callback_data="get_chapters"),
+            InlineKeyboardButton("🔍 Voir Chapitre", callback_data="get_chapter")
+        ],
+        [InlineKeyboardButton("🔙 Retour", callback_data="main_menu")]
     ])
 
 def info_menu():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("All Info", callback_data="all_info"),
-            InlineKeyboardButton("📌 Chapitres", callback_data="chapters"),
-            InlineKeyboardButton("ℹ️ Métadonnées", callback_data="metadata")
+            InlineKeyboardButton("➕ Ajouter Chapitres", callback_data="add_chapters"),
+            InlineKeyboardButton("✏️ Modifier Chapitre", callback_data="edit_chapter")
         ],
         [
             InlineKeyboardButton("📊 Résolution", callback_data="resolution"),
-            InlineKeyboardButton("🔙 Retour", callback_data="main_menu")
+            InlineKeyboardButton("� Retour", callback_data="main_menu")
         ]
     ])
 
@@ -1505,5 +1509,929 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                             except:
                                 pass
                     os.rmdir(user_dir)
+            except Exception as e:
+                print(f"Erreur de nettoyage: {str(e)}")
+    
+    elif data == "subtitle_extract":
+        try:
+            await callback_query.answer("⏳ Extraction des sous-titres...")
+            
+            # Vérification du fichier source
+            if not msg.reply_to_message or not (msg.reply_to_message.video or msg.reply_to_message.document):
+                await callback_query.answer("❌ Aucun fichier vidéo trouvé", show_alert=True)
+                return
+            
+            # Création du dossier temporaire
+            user_dir = f"downloads/{user.id}_{int(time.time())}"
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Téléchargement du fichier
+            try:
+                status_msg = await msg.edit("⏳ Téléchargement de la vidéo...")
+            except MessageIdInvalid:
+                status_msg = await msg.reply("⏳ Téléchargement de la vidéo...")
+            
+            try:
+                input_path = await msg.reply_to_message.download(
+                    file_name=f"{user_dir}/original.mp4",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement...", status_msg, time.time())
+                )
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur de téléchargement: {str(e)}")
+                try:
+                    os.rmdir(user_dir)
+                except:
+                    pass
+                return
+
+            # Demande de confirmation
+            await status_msg.edit(
+                "📝 <b>Extraire les sous-titres de cette vidéo?</b>\n\n"
+                f"Fichier: {os.path.basename(input_path)}\n\n"
+                "Tapez /confirm pour continuer ou /cancel pour annuler"
+            )
+            
+            try:
+                response = await client.listen(
+                    filters.text & filters.user(user.id),
+                    timeout=60
+                )
+                
+                if response.text.strip().lower() == "/cancel":
+                    await status_msg.edit("❌ Opération annulée")
+                    return
+                elif response.text.strip().lower() != "/confirm":
+                    await status_msg.edit("❌ Commande invalide. Opération annulée")
+                    return
+                    
+                await response.delete()
+                
+                # Extraction des sous-titres
+                await status_msg.edit("⚙️ Extraction des sous-titres...")
+                
+                videoclient = deps.videoclient
+                videoclient.output_path = Path(user_dir)
+                
+                subtitle_files = await videoclient.extract_subtitles(
+                    input_path=input_path,
+                    output_dir=user_dir,
+                )
+                
+                if not subtitle_files or not isinstance(subtitle_files, list):
+                    await status_msg.edit("❌ Aucun sous-titre trouvé ou erreur d'extraction")
+                    return
+                    
+                for sub_file in subtitle_files:
+                    if os.path.exists(sub_file):
+                        await client.send_document(
+                            chat_id=user.id,
+                            document=sub_file,
+                            caption=f"📝 Sous-titre extrait: {os.path.basename(sub_file)}",
+                            force_document=True,
+                            progress=progress_for_pyrogram,
+                            progress_args=("Envoi...", status_msg, time.time())
+                        )
+                        os.remove(sub_file)  
+                        await asyncio.sleep(1)
+                await status_msg.edit("✅ Extraction terminée avec succès!")
+                await asyncio.sleep(2)
+                await status_msg.delete()
+                
+            except asyncio.TimeoutError:
+                await status_msg.edit("⌛ Temps écoulé - opération annulée")
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur: {str(e)}")
+        finally:
+            # Nettoyage complet
+            try:
+                if 'input_path' in locals() and os.path.exists(input_path):
+                    os.remove(input_path)
+                if 'user_dir' in locals() and os.path.exists(user_dir):
+                    for root, _, files in os.walk(user_dir):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            try:
+                                if os.path.exists(file_path):
+                                    os.remove(file_path)
+                            except:
+                                pass
+                    os.rmdir(user_dir)
+            except Exception as e:
+                print(f"Erreur lors du nettoyage: {str(e)}")
+                
+    elif data == "subtitle_add":
+        try:
+            await callback_query.answer("⏳ Ajout de sous-titres en cours...")
+            
+            # Vérification du fichier source
+            if not msg.reply_to_message or not (msg.reply_to_message.video or msg.reply_to_message.document):
+                await callback_query.answer("❌ Aucun fichier vidéo trouvé", show_alert=True)
+                return
+            
+            # Création du dossier temporaire
+            user_dir = f"downloads/{user.id}_{int(time.time())}"
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Téléchargement du fichier vidéo
+            try:
+                status_msg = await msg.edit("⏳ Téléchargement de la vidéo...")
+            except MessageIdInvalid:
+                status_msg = await msg.reply("⏳ Téléchargement de la vidéo...")
+            
+            try:
+                video_path = await msg.reply_to_message.download(
+                    file_name=f"{user_dir}/original.mp4",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement vidéo...", status_msg, time.time())
+                )
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur de téléchargement vidéo: {str(e)}")
+                try:
+                    os.rmdir(user_dir)
+                except:
+                    pass
+                return
+
+            # Demande du fichier de sous-titres
+            await status_msg.edit(
+                "📜 <b>Envoyez maintenant le fichier de sous-titres</b>\n\n"
+                "Formats supportés: .srt, .vtt, .ass\n\n"
+                "Tapez /cancel pour annuler"
+            )
+            
+            try:
+                # Attendre le fichier de sous-titres
+                subtitle_response = await client.listen(
+                    filters=(filters.document | filters.text) & filters.user(user.id),
+                    timeout=120
+                )
+                
+                if subtitle_response.text and "/cancel" in subtitle_response.text.lower():
+                    await status_msg.edit("❌ Opération annulée")
+                    return
+                    
+                # Télécharger le fichier de sous-titres
+                await status_msg.edit("⏳ Téléchargement des sous-titres...")
+                subtitle_path = await subtitle_response.download(
+                    file_name=f"{user_dir}/subtitles.{subtitle_response.document.file_name.split('.')[-1]}",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement sous-titres...", status_msg, time.time())
+                )
+                
+                # Traitement de la vidéo
+                await status_msg.edit("⚙️ Ajout des sous-titres...")
+                videoclient = deps.videoclient
+                videoclient.output_path = Path(user_dir)
+                
+                # Étape 1: Suppression des sous-titres existants
+                temp_video = await videoclient.remove_subtitles(
+                    input_path=video_path,
+                    output_name="no_subtitles"
+                )
+                if not temp_video:
+                    await status_msg.edit("❌ Échec du nettoyage des sous-titres existants")
+                    return
+                await subtitle_response.delete()
+                # Étape 2: Ajout des nouveaux sous-titres
+                result = await videoclient.add_subtitle(
+                    input_path=temp_video,
+                    sbt_file=subtitle_path,
+                    language="french",
+                    output_name="final_output",
+                    is_forced=False,
+                )
+                
+                if not result:
+                    await status_msg.edit("❌ Échec de l'ajout des sous-titres")
+                    return
+                    
+                # Envoi du résultat
+                await client.send_video(
+                    chat_id=user.id,
+                    video=result,
+                    caption="🎬 Vidéo avec sous-titres ajoutés",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Envoi...", status_msg, time.time())
+                )
+                
+                await status_msg.edit("✅ Sous-titres ajoutés avec succès!")
+                await asyncio.sleep(2)
+                await status_msg.delete()
+                
+            except asyncio.TimeoutError:
+                await status_msg.edit("⌛ Temps écoulé - opération annulée")
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur: {str(e)}")
+        finally:
+            try:
+                # Sécuriser les variables si elles n'existent pas
+                for file in [locals().get("video_path"), locals().get("subtitle_path"), locals().get("temp_video"), locals().get("result")]:
+                    if file and os.path.exists(file):
+                        try:
+                            os.remove(file)
+                        except Exception as e:
+                            print(f"Erreur suppression fichier {file}: {e}")
+                
+                # Nettoyage du dossier utilisateur
+                if os.path.exists(user_dir):
+                    for root, _, files in os.walk(user_dir):
+                        for file in files:
+                            try:
+                                os.remove(os.path.join(root, file))
+                            except Exception as e:
+                                print(f"Erreur suppression dans {root}: {e}")
+                    try:
+                        os.rmdir(user_dir)
+                    except Exception as e:
+                        print(f"Erreur suppression dossier {user_dir}: {e}")
+            except Exception as e:
+                print(f"Erreur lors du nettoyage général: {str(e)}")
+                
+    elif data == "force_subtitle":
+        try:
+            await callback_query.answer("⏳ Ajout de sous-titres en cours...")
+            
+            # Vérification du fichier source
+            if not msg.reply_to_message or not (msg.reply_to_message.video or msg.reply_to_message.document):
+                await callback_query.answer("❌ Aucun fichier vidéo trouvé", show_alert=True)
+                return
+            
+            # Création du dossier temporaire
+            user_dir = f"downloads/{user.id}_{int(time.time())}"
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Téléchargement du fichier vidéo
+            try:
+                status_msg = await msg.edit("⏳ Téléchargement de la vidéo...")
+            except MessageIdInvalid:
+                status_msg = await msg.reply("⏳ Téléchargement de la vidéo...")
+            
+            try:
+                video_path = await msg.reply_to_message.download(
+                    file_name=f"{user_dir}/original.mp4",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement vidéo...", status_msg, time.time())
+                )
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur de téléchargement vidéo: {str(e)}")
+                try:
+                    os.rmdir(user_dir)
+                except:
+                    pass
+                return
+
+            # Demande du fichier de sous-titres
+            await status_msg.edit(
+                "📜 <b>Envoyez maintenant le fichier de sous-titres</b>\n\n"
+                "Formats supportés: .srt, .vtt, .ass\n\n"
+                "Tapez /cancel pour annuler"
+            )
+            
+            try:
+                # Attendre le fichier de sous-titres
+                subtitle_response = await client.listen(
+                    filters=(filters.document | filters.text) & filters.user(user.id),
+                    timeout=120
+                )
+                
+                if subtitle_response.text and "/cancel" in subtitle_response.text.lower():
+                    await status_msg.edit("❌ Opération annulée")
+                    return
+                    
+                # Télécharger le fichier de sous-titres
+                await status_msg.edit("⏳ Téléchargement des sous-titres...")
+                subtitle_path = await subtitle_response.download(
+                    file_name=f"{user_dir}/subtitles.{subtitle_response.document.file_name.split('.')[-1]}",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement sous-titres...", status_msg, time.time())
+                )
+                
+                # Traitement de la vidéo
+                await status_msg.edit("⚙️ Ajout des sous-titres...")
+                videoclient = deps.videoclient
+                videoclient.output_path = Path(user_dir)
+                
+                # Étape 1: Suppression des sous-titres existants
+                temp_video = await videoclient.remove_subtitles(
+                    input_path=video_path,
+                    output_name="no_subtitles"
+                )
+                if not temp_video:
+                    await status_msg.edit("❌ Échec du nettoyage des sous-titres existants")
+                    return
+                await subtitle_response.delete()
+                # Étape 2: Ajout des nouveaux sous-titres
+                result = await videoclient.add_subtitle(
+                    input_path=temp_video,
+                    sbt_file=subtitle_path,
+                    language="french",
+                    output_name="final_output",
+                    is_forced=True,
+                )
+                
+                if not result:
+                    await status_msg.edit("❌ Échec de l'ajout des sous-titres")
+                    return
+                    
+                # Envoi du résultat
+                await client.send_video(
+                    chat_id=user.id,
+                    video=result,
+                    caption="🎬 Vidéo avec sous-titres ajoutés",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Envoi...", status_msg, time.time())
+                )
+                
+                await status_msg.edit("✅ Sous-titres ajoutés avec succès!")
+                await asyncio.sleep(2)
+                await status_msg.delete()
+                
+            except asyncio.TimeoutError:
+                await status_msg.edit("⌛ Temps écoulé - opération annulée")
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur: {str(e)}")
+        finally:
+            try:
+                # Sécuriser les variables si elles n'existent pas
+                for file in [locals().get("video_path"), locals().get("subtitle_path"), locals().get("temp_video"), locals().get("result")]:
+                    if file and os.path.exists(file):
+                        try:
+                            os.remove(file)
+                        except Exception as e:
+                            print(f"Erreur suppression fichier {file}: {e}")
+                
+                # Nettoyage du dossier utilisateur
+                if os.path.exists(user_dir):
+                    for root, _, files in os.walk(user_dir):
+                        for file in files:
+                            try:
+                                os.remove(os.path.join(root, file))
+                            except Exception as e:
+                                print(f"Erreur suppression dans {root}: {e}")
+                    try:
+                        os.rmdir(user_dir)
+                    except Exception as e:
+                        print(f"Erreur suppression dossier {user_dir}: {e}")
+            except Exception as e:
+                print(f"Erreur lors du nettoyage général: {str(e)}")
+
+    elif data == "remove_subtitles":
+        try:
+            await callback_query.answer("⏳ Suppression des sous-titres en cours...")
+            # Vérification du fichier source
+            if not msg.reply_to_message or not (msg.reply_to_message.video or msg.reply_to_message.document):
+                await callback_query.answer("❌ Aucun fichier vidéo trouvé", show_alert=True)
+                return
+            # Création du dossier temporaire
+            user_dir = f"downloads/{user.id}_{int(time.time())}"
+            os.makedirs(user_dir, exist_ok=True)
+            # Téléchargement du fichier
+            try:
+                status_msg = await msg.edit("⏳ Téléchargement du fichier vidéo...")
+            except MessageIdInvalid:
+                status_msg = await msg.reply("⏳ Téléchargement du fichier vidéo...")
+            try:
+                input_path = await msg.reply_to_message.download(
+                    file_name=f"{user_dir}/original.mp4",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement...", status_msg, time.time())
+                )
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur de téléchargement: {str(e)}")
+                try:
+                    os.rmdir(user_dir)
+                except:
+                    pass
+                return
+            # Demande de confirmation
+            await status_msg.edit(
+                "❌ <b>Supprimer les sous-titres de cette vidéo?</b>\n\n"
+                f"Fichier: {os.path.basename(input_path)}\n\n"
+                "Tapez /confirm pour continuer ou /cancel pour annuler"
+            )
+            try:
+                response = await client.listen(
+                    filters.text & filters.user(user.id),
+                    timeout=60
+                )
+                
+                if response.text.strip().lower() == "/cancel":
+                    await status_msg.edit("❌ Opération annulée")
+                    return
+                elif response.text.strip().lower() != "/confirm":
+                    await status_msg.edit("❌ Commande invalide. Opération annulée")
+                    return
+                    
+                await response.delete()
+                
+                # Traitement de la vidéo
+                await status_msg.edit("⚙️ Suppression des sous-titres...")
+                
+                videoclient = deps.videoclient
+                videoclient.output_path = Path(user_dir)
+                
+                result = await videoclient.remove_subtitles(
+                    input_path=input_path,
+                    output_name="no_subtitles"
+                )
+                
+                if not result:
+                    await status_msg.edit("❌ Échec de la suppression des sous-titres")
+                    return
+                    
+                # Envoi du résultat
+                await client.send_video(
+                    chat_id=user.id,
+                    video=result,
+                    caption="🎬 Vidéo sans sous-titres",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Envoi...", status_msg, time.time())
+                )
+                
+                await status_msg.edit("✅ Sous-titres supprimés avec succès!")
+                await asyncio.sleep(2)
+                await status_msg.delete()
+                
+            except asyncio.TimeoutError:
+                await status_msg.edit("⌛ Temps écoulé - opération annulée")
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur: {str(e)}")
+        finally:
+            # Nettoyage complet
+            try:
+                if os.path.exists(input_path):
+                    os.remove(input_path)
+                if 'result' in locals() and os.path.exists(result):
+                    os.remove(result)
+                if os.path.exists(user_dir):
+                    for root, _, files in os.walk(user_dir):
+                        for file in files:
+                            try:
+                                os.remove(os.path.join(root, file))
+                            except:
+                                pass
+                    os.rmdir(user_dir)
+            except Exception as e:
+                print(f"Erreur de nettoyage: {str(e)}")
+    
+    elif data in ["choose_subtitle", "choose_subtitle_burn"]:
+        try:
+            await callback_query.answer("⏳ Choix des sous-titres en cours...")
+            
+            # Vérification plus robuste du fichier source
+            if not msg.reply_to_message:
+                await callback_query.answer("❌ Aucun message auquel répondre", show_alert=True)
+                return
+                
+            reply_msg = msg.reply_to_message
+            if not (reply_msg.video or (reply_msg.document and reply_msg.document.mime_type.startswith('video/'))):
+                await callback_query.answer("❌ Aucun fichier vidéo trouvé", show_alert=True)
+                return
+            
+            # Création du dossier temporaire
+            user_dir = f"downloads/{user.id}_{int(time.time())}"
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Téléchargement du fichier avec gestion du nom de fichier plus sûre
+            try:
+                status_msg = await msg.edit("⏳ Téléchargement de la vidéo...")
+            except MessageIdInvalid:
+                status_msg = await msg.reply("⏳ Téléchargement de la vidéo...")
+            
+            try:
+                # Détermination du nom de fichier
+                if reply_msg.video:
+                    file_name = reply_msg.video.file_name or "video.mp4"
+                else:
+                    file_name = reply_msg.document.file_name or "video.mp4"
+                
+                input_path = await reply_msg.download(
+                    file_name=f"{user_dir}/original_{file_name}",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement...", status_msg, time.time())
+                )
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur de téléchargement: {str(e)}")
+                try:
+                    os.rmdir(user_dir)
+                except:
+                    pass
+                return
+            
+            # Suite du traitement...
+            videoclient = deps.videoclient
+            videoclient.output_path = Path(user_dir)
+            media_info = await videoclient.get_media_info(input_path)
+            
+            if not media_info or not media_info.subtitle_tracks:
+                await status_msg.edit("❌ Aucun sous-titre trouvé dans le fichier vidéo.")
+                return 
+            
+            subtitle_languages = [track.language.lower() for track in media_info.subtitle_tracks]
+            unique_languages = list(dict.fromkeys(subtitle_languages))
+            
+            languages_text = "\n".join(f"- {lang.capitalize()}" for lang in unique_languages)
+            await status_msg.edit(
+                f"🎬 <b>Sélectionnez une langue de sous-titre</b>\n\n"
+                f"Langues disponibles:\n{languages_text}\n\n"
+                "Répondez avec la langue souhaitée ou /cancel pour annuler"
+            )
+            
+            try:
+                response = await client.listen(
+                    filters.text & filters.user(user.id),
+                    timeout=60
+                )
+                
+                if response.text.strip().lower() == "/cancel":
+                    await status_msg.edit("❌ Opération annulée")
+                    return
+                    
+                selected_lang = response.text.strip().lower()
+                await response.delete()
+                
+                if selected_lang not in subtitle_languages:
+                    await status_msg.edit("❌ Langue invalide. Veuillez réessayer ou /cancel pour annuler")
+                    return
+                    
+                sub_index = next(i for i, track in enumerate(media_info.subtitle_tracks) 
+                            if track.language.lower() == selected_lang)
+                
+                await status_msg.edit(f"⚙️ Traitement du sous-titre {selected_lang.capitalize()}...")
+                
+                output_name = f"output_{int(time.time())}"
+                
+                # Choix de la fonction à appeler selon le bouton
+                if data == "choose_subtitle":
+                    result = await videoclient.choose_subtitle(
+                        input_path=input_path,
+                        output_name=output_name,
+                        language=selected_lang,
+                        index=sub_index,
+                        make_default=True,
+                    )
+                else:  # choose_subtitle_burn
+                    result = await videoclient.choose_subtitle_burn(
+                        input_path=input_path,
+                        output_name=output_name,
+                        language=selected_lang,
+                        index=sub_index,
+                    )
+                
+                if not result:
+                    await status_msg.edit("❌ Échec du choix des sous-titres")
+                    return
+                    
+                await client.send_video(
+                    chat_id=user.id,
+                    video=result,
+                    caption=f"🎬 Vidéo avec sous-titres {selected_lang.capitalize()}",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Envoi...", status_msg, time.time())
+                )
+                
+                await status_msg.edit("✅ Sous-titres choisis avec succès!")
+                await asyncio.sleep(2)
+                await status_msg.delete()
+                
+            except asyncio.TimeoutError:
+                await status_msg.edit("⌛ Temps écoulé - opération annulée")
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur: {str(e)}")
+                
+        finally:
+            try:
+                if os.path.exists(input_path):
+                    os.remove(input_path)
+                if 'result' in locals() and os.path.exists(result):
+                    os.remove(result)
+                if os.path.exists(user_dir):
+                    for root, _, files in os.walk(user_dir):
+                        for file in files:
+                            try:
+                                os.remove(os.path.join(root, file))
+                            except:
+                                pass
+                    os.rmdir(user_dir)
+            except Exception as e:
+                print(f"Erreur de nettoyage: {str(e)}")
+    
+    elif data in ["add_chapters", "edit_chapter", "split_chapter", "remove_chapters", "get_chapters", "get_chapter"]:
+        try:
+            await callback_query.answer("⏳ Traitement des chapitres en cours...")
+            
+            # Création du dossier temporaire
+            user_dir = f"downloads/{user.id}_{int(time.time())}"
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Vérification du fichier source
+            if not msg.reply_to_message or not (msg.reply_to_message.video or 
+                                            (msg.reply_to_message.document and 
+                                            msg.reply_to_message.document.mime_type.startswith('video/'))):
+                # Demander le fichier vidéo si non fourni en réponse
+                try:
+                    status_msg = await msg.edit("📤 Veuillez envoyer le fichier vidéo...")
+                    file_msg = await client.listen(
+                        filters=(filters.document | filters.video) & filters.user(user.id),
+                        timeout=60
+                    )
+                    
+                    if not (file_msg.video or (file_msg.document and file_msg.document.mime_type.startswith('video/'))):
+                        await status_msg.edit("❌ Format de fichier non supporté")
+                        return
+                        
+                    reply_msg = file_msg
+                except asyncio.TimeoutError:
+                    await status_msg.edit("⌛ Temps écoulé - opération annulée")
+                    return
+            else:
+                reply_msg = msg.reply_to_message
+                status_msg = await msg.edit("⏳ Téléchargement de la vidéo...")
+            
+            # Téléchargement du fichier vidéo
+            try:
+                if reply_msg.video:
+                    file_name = reply_msg.video.file_name or "video.mp4"
+                else:
+                    file_name = reply_msg.document.file_name or "video.mp4"
+                
+                input_path = await reply_msg.download(
+                    file_name=f"{user_dir}/{file_name}",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement...", status_msg, time.time())
+                )
+            except Exception as e:
+                await status_msg.edit(f"❌ Erreur de téléchargement: {str(e)}")
+                return
+            
+            # Initialisation du client vidéo
+            videoclient = deps.videoclient
+            videoclient.output_path = Path(user_dir)
+            
+            if data == "get_chapters":
+                # Affichage des chapitres existants
+                chapters = await videoclient.get_chapters(input_path)
+                if not chapters:
+                    await status_msg.edit("ℹ️ Aucun chapitre trouvé dans la vidéo")
+                    return
+                    
+                chapters_text = "\n".join(
+                    f"{i+1}. {chap.get('title', 'Sans titre')} "
+                    f"(de {chap['start']} à {chap['end']})"
+                    for i, chap in enumerate(chapters)
+                )
+                await status_msg.edit(
+                    f"📋 Chapitres trouvés dans {Path(input_path).name}:\n\n{chapters_text}"
+                )
+                return
+                
+            elif data == "get_chapter":
+                # Obtenir un chapitre spécifique
+                await status_msg.edit("🔢 Veuillez répondre avec le numéro du chapitre souhaité")
+                try:
+                    response = await client.listen(
+                        filters.text & filters.user(user.id),
+                        timeout=30
+                    )
+                    chapter_index = int(response.text.strip())
+                    
+                    chapter = await videoclient.get_chapter(input_path, chapter_index)
+                    if not chapter:
+                        await status_msg.edit("❌ Chapitre non trouvé")
+                        return
+                        
+                    await status_msg.edit(
+                        f"📌 Chapitre {chapter_index}:\n\n"
+                        f"Titre: {chapter.get('title', 'Sans titre')}\n"
+                        f"Début: {chapter['start']}\n"
+                        f"Fin: {chapter['end']}"
+                    )
+                except (asyncio.TimeoutError, ValueError):
+                    await status_msg.edit("❌ Entrée invalide ou temps écoulé")
+                return
+                
+            elif data == "remove_chapters":
+                # Suppression des chapitres
+                output_name = f"no_chapters_{int(time.time())}"
+                result = await videoclient.remove_chapters(input_path, output_name)
+                
+                if not result:
+                    await status_msg.edit("❌ Échec de la suppression des chapitres")
+                    return
+                    
+                await client.send_video(
+                    chat_id=user.id,
+                    video=result,
+                    caption="🎬 Vidéo sans chapitres",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Envoi...", status_msg, time.time())
+                )
+                
+            elif data == "add_chapters":
+                # Ajout de chapitres
+                await status_msg.edit("📝 Veuillez envoyer le fichier de chapitres (JSON/TXT)...")
+                try:
+                    chapter_msg = await client.listen(
+                        filters=filters.document & filters.user(user.id),
+                        timeout=60
+                    )
+                    
+                    chapter_file = await chapter_msg.download(
+                        file_name=f"{user_dir}/chapters{Path(chapter_msg.document.file_name).suffix}"
+                    )
+                    
+                    # Parser le fichier de chapitres
+                    if Path(chapter_file).suffix == '.json':
+                        with open(chapter_file) as f:
+                            chapters_data = json.load(f)
+                        chapters = chapters_data.get('chapters', [])
+                    else:  # Format texte simple
+                        with open(chapter_file) as f:
+                            lines = [line.strip() for line in f if line.strip()]
+                        chapters = []
+                        for line in lines:
+                            parts = line.split(maxsplit=1)
+                            if len(parts) == 2:
+                                chapters.append({
+                                    'start': parts[0],
+                                    'end': '',  # À calculer
+                                    'title': parts[1]
+                                })
+                    
+                    if not chapters:
+                        await status_msg.edit("❌ Format de chapitres invalide")
+                        return
+                        
+                    output_name = f"with_chapters_{int(time.time())}"
+                    result = await videoclient.add_chapters(
+                        input_path=input_path,
+                        output_name=output_name,
+                        chapters=chapters
+                    )
+                    
+                    if not result:
+                        await status_msg.edit("❌ Échec de l'ajout des chapitres")
+                        return
+                        
+                    await client.send_video(
+                        chat_id=user.id,
+                        video=result,
+                        caption="🎬 Vidéo avec chapitres ajoutés",
+                        progress=progress_for_pyrogram,
+                        progress_args=("Envoi...", status_msg, time.time())
+                    )
+                    
+                except asyncio.TimeoutError:
+                    await status_msg.edit("⌛ Temps écoulé - opération annulée")
+                    return
+                    
+            elif data == "edit_chapter":
+                # Édition d'un chapitre
+                chapters = await videoclient.get_chapters(input_path)
+                if not chapters:
+                    await status_msg.edit("❌ Aucun chapitre à modifier")
+                    return
+                    
+                # Afficher la liste des chapitres
+                chapters_text = "\n".join(
+                    f"{i+1}. {chap.get('title', 'Sans titre')}" 
+                    for i, chap in enumerate(chapters)
+                )   
+                await status_msg.edit(
+                    f"📋 Sélectionnez le chapitre à modifier:\n\n{chapters_text}\n\n"
+                    "Répondez avec le numéro du chapitre"
+                )
+                
+                try:
+                    response = await client.listen(
+                        filters.text & filters.user(user.id),
+                        timeout=30
+                    )
+                    chapter_index = int(response.text.strip())
+                    
+                    await status_msg.edit(
+                        "✏️ Format de modification:\n\n"
+                        "Nouveau_titre (optionnel)\n"
+                        "Nouveau_début (optionnel, format HH:MM:SS)\n"
+                        "Nouvelle_fin (optionnel, format HH:MM:SS)\n\n"
+                        "Exemple:\n"
+                        "Nouveau Titre\n"
+                        "00:05:00\n"
+                        "00:07:30"
+                    )
+                    
+                    edit_data = await client.listen(
+                        filters.text & filters.user(user.id),
+                        timeout=120
+                    )
+                    
+                    lines = [line.strip() for line in edit_data.text.split('\n') if line.strip()]
+                    new_title = lines[0] if len(lines) > 0 else None
+                    new_start = lines[1] if len(lines) > 1 else None
+                    new_end = lines[2] if len(lines) > 2 else None
+                    
+                    output_name = f"edited_chapter_{int(time.time())}"
+                    result = await videoclient.edit_chapter(
+                        input_path=input_path,
+                        output_name=output_name,
+                        chapter_index=chapter_index,
+                        new_title=new_title,
+                        new_start=new_start,
+                        new_end=new_end
+                    )
+                    
+                    if not result:
+                        await status_msg.edit("❌ Échec de la modification du chapitre")
+                        return
+                        
+                    await client.send_video(
+                        chat_id=user.id,
+                        video=result,
+                        caption="🎬 Vidéo avec chapitre modifié",
+                        progress=progress_for_pyrogram,
+                        progress_args=("Envoi...", status_msg, time.time())
+                    )
+                    
+                except (asyncio.TimeoutError, ValueError):
+                    await status_msg.edit("❌ Entrée invalide ou temps écoulé")
+                    return
+                    
+            elif data == "split_chapter":
+                # Division d'un chapitre
+                chapters = await videoclient.get_chapters(input_path)
+                if not chapters:
+                    await status_msg.edit("❌ Aucun chapitre à diviser")
+                    return
+                    
+                # Afficher la liste des chapitres
+                chapters_text = "\n".join(
+                    f"{i+1}. {chap.get('title', 'Sans titre')}" 
+                    for i, chap in enumerate(chapters))
+                    
+                await status_msg.edit(
+                    f"📋 Sélectionnez le chapitre à diviser:\n\n{chapters_text}\n\n"
+                    "Répondez avec le numéro du chapitre"
+                )
+                
+                try:
+                    response = await client.listen(
+                        filters.text & filters.user(user.id),
+                        timeout=30
+                    )
+                    chapter_index = int(response.text.strip())
+                    
+                    await status_msg.edit(
+                        "⏱ Veuillez entrer l'heure de division (format HH:MM:SS)\n\n"
+                        f"Le chapitre actuel va de {chapters[chapter_index-1]['start']} à {chapters[chapter_index-1]['end']}"
+                    )
+                    
+                    split_msg = await client.listen(
+                        filters.text & filters.user(user.id),
+                        timeout=30
+                    )
+                    split_time = split_msg.text.strip()
+                    
+                    output_name = f"split_chapter_{int(time.time())}"
+                    result = await videoclient.split_chapter(
+                        input_path=input_path,
+                        output_name=output_name,
+                        chapter_index=chapter_index,
+                        split_time=split_time
+                    )
+                    
+                    if not result:
+                        await status_msg.edit("❌ Échec de la division du chapitre")
+                        return
+                        
+                    await client.send_video(
+                        chat_id=user.id,
+                        video=result,
+                        caption="🎬 Vidéo avec chapitre divisé",
+                        progress=progress_for_pyrogram,
+                        progress_args=("Envoi...", status_msg, time.time())
+                    )
+                    
+                except (asyncio.TimeoutError, ValueError):
+                    await status_msg.edit("❌ Entrée invalide ou temps écoulé")
+                    return
+            
+            await status_msg.edit("✅ Opération terminée avec succès!")
+            await asyncio.sleep(2)
+            await status_msg.delete()
+            
+        except Exception as e:
+            await msg.edit(f"❌ Erreur: {str(e)}")
+        finally:
+            # Nettoyage des fichiers temporaires
+            try:
+                if 'input_path' in locals() and os.path.exists(input_path):
+                    os.remove(input_path)
+                if 'result' in locals() and result and os.path.exists(result):
+                    os.remove(result)
+                if 'chapter_file' in locals() and chapter_file and os.path.exists(chapter_file):
+                    os.remove(chapter_file)
+                if os.path.exists(user_dir):
+                    shutil.rmtree(user_dir)
             except Exception as e:
                 print(f"Erreur de nettoyage: {str(e)}")
