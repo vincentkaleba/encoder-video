@@ -41,3 +41,4 @@ class Dependencies:
         if self.bot:
             await self.bot.stop()
         await self.mongo.disconnect()
+        await self.videoclient.close()

@@ -129,7 +129,7 @@ def info_menu():
         ]
     ])
 
-@Client.on_message(filters.document | filters.video | filters.audio | filters.voice | filters.animation)
+@Client.on_message(filters.document | filters.video | filters.audio | filters.voice | filters.animation & filters.private)
 async def handle_video(client: Client, message: Message):
     if message.document or message.video:
         await message.reply_text(
