@@ -1765,71 +1765,90 @@ class VideoClient:
     async def _transition_concat(self, input_files: List[Path], 
                             output_path: Path,
                             transition_duration: float) -> Optional[Path]:
-        """Optimized concatenation with transitions."""
+        """Concatenation with perfect audio-video sync and smooth transitions."""
         try:
             media_infos = await asyncio.gather(*[self.get_media_info(f) for f in input_files])
             if None in media_infos:
-                self.logger.error("Failed to get media info for all files")
+                self.logger.error("Missing media info for some files")
                 return None
 
             target_width = media_infos[0].width
             target_height = media_infos[0].height
 
-            filter_parts = []
+            filter_complex = []
             inputs = []
-            audio_inputs = []
-            last_video = None
-
+            
             for i, (file, mi) in enumerate(zip(input_files, media_infos)):
                 inputs.extend(["-i", str(file)])
                 
-                filter_parts.append(
+                filter_complex.append(
                     f"[{i}:v]scale={target_width}:{target_height}:"
                     f"force_original_aspect_ratio=decrease,"
-                    f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2[v{i}];"
+                    f"pad={target_width}:{target_height}:-1:-1:color=black[v{i}];"
                 )
                 
-                filter_parts.append(f"[{i}:a]aformat=sample_fmts=fltp:44100:stereo[a{i}];")
-                audio_inputs.append(f"[a{i}]")
-                
-                if i > 0:
-                    transition_start = max(0, mi.duration - transition_duration)
-                    filter_parts.append(
-                        f"{last_video}[v{i}]xfade=transition=fade:"
-                        f"duration={transition_duration}:"
-                        f"offset={transition_start}[vout{i}];"
-                    )
-                    last_video = f"[vout{i}]"
-                else:
-                    last_video = f"[v{i}]"
+                filter_complex.append(f"[{i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}];")
 
-            filter_parts.append(f"{''.join(audio_inputs)}concat=n={len(input_files)}:v=0:a=1[audio]")
+            for i in range(len(input_files) - 1):
+                if i == 0:
+                    base = f"[v{i}]"
+                else:
+                    base = f"[vout{i-1}]"
+                    
+                next_vid = f"[v{i+1}]"
+                transition_start = max(0, media_infos[i].duration - transition_duration)
+                
+                filter_complex.append(
+                    f"{base}{next_vid}xfade=transition=fade:duration={transition_duration}:"
+                    f"offset={transition_start}[vout{i}];"
+                )
+
+            for i in range(len(input_files) - 1):
+                if i == 0:
+                    audio_base = f"[a{i}]"
+                else:
+                    audio_base = f"[across{i-1}]"
+                    
+                next_aud = f"[a{i+1}]"
+                afade_duration = transition_duration * 1000 
+                afade_start = max(0, media_infos[i].duration - transition_duration)
+                
+                filter_complex.append(
+                    f"{audio_base}atrim=0:{afade_start}[atrim{i}];"
+                    f"{audio_base}atrim={afade_start},asetpts=PTS-STARTPTS[afadeout{i}];"
+                    f"{next_aud}atrim=0:{transition_duration},asetpts=PTS-STARTPTS[afadein{i+1}];"
+                    f"[afadeout{i}][afadein{i+1}]acrossfade=d={afade_duration}[across{i}];"
+                    f"[atrim{i}][across{i}]concat=n=2:v=0:a=1[amix{i}];"
+                )
+
+            final_video = f"[vout{len(input_files)-2}]" if len(input_files) > 1 else "[v0]"
+            
+            if len(input_files) > 1:
+                final_audio = f"[amix{len(input_files)-2}]"
+            else:
+                final_audio = "[a0]"
 
             command = [
                 self.ffmpeg_path,
                 *inputs,
-                "-filter_complex", "".join(filter_parts),
-                "-map", last_video,
-                "-map", "[audio]",
+                "-filter_complex", "".join(filter_complex),
+                "-map", final_video,
+                "-map", final_audio,
                 "-c:v", "libx264",
                 "-preset", "fast",
-                "-crf", "23",
+                "-crf", "22",
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
-                "-threads", str(min(4, self.thread_count)),
                 "-y",
                 str(output_path)
             ]
 
-            self.logger.info(
-                f"Concatenating {len(input_files)} videos with "
-                f"{transition_duration}s transitions"
-            )
+            self.logger.debug("Full FFmpeg command: " + " ".join(command))
             return output_path if await self._run_ffmpeg_command(command, timeout=3600) else None
 
         except Exception as e:
-            self.logger.error(f"Transition concatenation failed: {str(e)}", exc_info=True)
+            self.logger.error(f"Advanced transition failed: {str(e)}", exc_info=True)
             return None
     
     RESOLUTION_PROFILES = {
