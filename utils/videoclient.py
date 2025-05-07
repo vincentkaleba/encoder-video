@@ -2141,7 +2141,7 @@ class VideoClient:
                         output_name: str,
                         cut_ranges: List[Tuple[float, float]]) -> Optional[List[Path]]:
         """
-        Optimized video splitting with parallel processing and keyframe accuracy.
+        Optimized video splitting with accurate cuts and proper audio sync.
         
         Args:
             input_path: Path to input video file
@@ -2160,54 +2160,46 @@ class VideoClient:
             self.logger.error("No cut ranges provided")
             return None
 
-        media_info = await self.get_media_info(input_path)
-        duration = media_info.duration if media_info else float('inf')
-
-        merged_ranges = []
+        validated_ranges = []
         for start, end in sorted((min(s,e), max(s,e)) for s,e in cut_ranges):
-            if start >= duration:
+            if start >= end:
                 continue
-                
-            end = min(end, duration)
-            if not merged_ranges:
-                merged_ranges.append((start, end))
-            else:
-                last_start, last_end = merged_ranges[-1]
-                if start <= last_end:
-                    merged_ranges[-1] = (last_start, max(last_end, end))
-                else:
-                    merged_ranges.append((start, end))
+            validated_ranges.append((start, end))
 
-        if not merged_ranges:
+        if not validated_ranges:
             self.logger.error("No valid cut ranges after validation")
             return None
 
-        output_ext = input_path.suffix
-        output_template = self.output_path / f"{output_name}_part%03d{output_ext}"
-
-        command = [
-            self.ffmpeg_path,
-            "-i", str(input_path),
-            "-f", "segment",
-            "-segment_times", ",".join(str(start) for start, _ in merged_ranges[1:]),
-            "-reset_timestamps", "1",
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            "-map", "0",
-            "-y",
-            str(output_template)
-        ]
-
-        self.logger.info(f"Splitting {input_path.name} into {len(merged_ranges)} parts")
-        if not await self._run_ffmpeg_command(command, timeout=3600):
-            return None
-
         output_files = []
-        for i, (start, end) in enumerate(merged_ranges, 1):
-            part_path = self.output_path / f"{output_name}_part{i:03d}{output_ext}"
-            if part_path.exists():
-                output_files.append(part_path)
+        output_ext = input_path.suffix or '.mp4'
+
+        for i, (start, end) in enumerate(validated_ranges, 1):
+            output_path = self.output_path / f"{output_name}_part{i:03d}{output_ext}"
+            
+            command = [
+                self.ffmpeg_path,
+                "-ss", str(start),
+                "-i", str(input_path),
+                "-to", str(end - start),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                "-avoid_negative_ts", "make_zero",
+                "-y",
+                str(output_path)
+            ]
+
+            self.logger.info(f"Processing segment {i}: {start}s to {end}s")
+            if not await self._run_ffmpeg_command(command, timeout=1800):
+                self.logger.error(f"Failed to process segment {i}")
+                continue
+
+            if output_path.exists():
+                output_files.append(output_path)
             else:
-                self.logger.warning(f"Missing output part {i}")
+                self.logger.warning(f"Output file missing: {output_path}")
 
         return output_files if output_files else None
