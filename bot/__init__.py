@@ -17,6 +17,7 @@ class Dependencies:
         
         # self.user_manager = UserManager(self.mongo)  
         self.videoclient = VideoClient("test", out_pth="data_encode", trd=100)  
+        self.videoclient.start()
         
         self.bot: Optional['Bot'] = None
     

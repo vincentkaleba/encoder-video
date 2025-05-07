@@ -11,7 +11,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageIdInvalid
 from bot import Dependencies
 from utils.videoclient import AudioCodec, MediaType, VideoClient
-from utils.helper import convert_to_seconds, progress_for_pyrogram
+from utils.helper import convert_to_seconds, progress_for_pyrogram, convert_to_seconds, seconds_to_timestamp
 from pathlib import Path
 import humanize
 
@@ -119,12 +119,9 @@ def tools_menu1():
 
 def info_menu():
     return InlineKeyboardMarkup([
+
         [
-            InlineKeyboardButton("➕ Ajouter Chapitres", callback_data="add_chapters"),
-            InlineKeyboardButton("✏️ Modifier Chapitre", callback_data="edit_chapter")
-        ],
-        [
-            InlineKeyboardButton("📊 Résolution", callback_data="resolution"),
+            InlineKeyboardButton("📊 All Infos", callback_data="all_info"),
             InlineKeyboardButton("� Retour", callback_data="main_menu")
         ]
     ])
@@ -191,8 +188,22 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             status_msg = await msg.reply("⏳ Téléchargement en cours...")
         
         try:
+            original_filename = None
+            if msg.reply_to_message.document:
+                original_filename = msg.reply_to_message.document.file_name
+            elif msg.reply_to_message.video:
+                original_filename = msg.reply_to_message.video.file_name
+            
+            if original_filename:
+                filename_without_ext = os.path.splitext(original_filename)[0]
+                output_basename = filename_without_ext
+                download_filename = f"{user_dir}/{filename_without_ext}_original{os.path.splitext(original_filename)[1] or '.mp4'}"
+            else:
+                output_basename = "compressed"
+                download_filename = f"{user_dir}/original.mp4"
+            
             file_path = await msg.reply_to_message.download(
-                file_name=f"{user_dir}/original.mp4",
+                file_name=download_filename,
                 progress=progress_for_pyrogram,
                 progress_args=("Téléchargement...", status_msg, time.time())
             )
@@ -209,55 +220,72 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             videoclient = deps.videoclient
             videoclient.output_path = Path(user_dir)
             
+            try:
+                media_info = await videoclient.get_media_info(file_path)
+                width = media_info.width if media_info and hasattr(media_info, 'width') else 320
+                height = media_info.height if media_info and hasattr(media_info, 'height') else None
+                duration = int(media_info.duration) if media_info and hasattr(media_info, 'duration') else 0
+            except Exception as e:
+                print(f"⚠️ Erreur lors de la récupération des infos média: {str(e)}")
+                width = 320
+                height = None
+                duration = 0
+            
             result = await videoclient.compress_video(
                 input_path=file_path,
-                output_basename="compressed",
+                output_basename=output_basename,
                 target_formats=["mp4"],
                 keep_original_quality=False,
             )
             
-            # Envoi des fichiers résultants
             if "mp4" in result and result["mp4"]:
                 for output_file in result["mp4"]:
                     if os.path.exists(output_file):
-                        await client.send_video(
-                            chat_id=user.id,
-                            video=output_file,
-                            caption=f"📦 Fichier compressé : {os.path.basename(output_file)}",
-                            progress=progress_for_pyrogram,
-                            progress_args=("Envoi...", status_msg, time.time())
-                        )
-                        await asyncio.sleep(3)
                         try:
-                            os.remove(output_file)
-                        except:
-                            pass
+                            await client.send_video(
+                                chat_id=user.id,
+                                video=output_file,
+                                width=width,
+                                height=height,
+                                duration=duration,
+                                caption=f"📦 Fichier compressé: {os.path.basename(output_file)}",
+                                progress=progress_for_pyrogram,
+                                progress_args=("Envoi...", status_msg, time.time())
+                            )
+                            await asyncio.sleep(1)
+                        except Exception as send_error:
+                            await status_msg.edit(f"❌ Erreur d'envoi: {str(send_error)}")
+                            await client.send_message(
+                                chat_id=user.id,
+                                text=f"❌ Impossible d'envoyer la vidéo: {str(send_error)}"
+                            )
+                        finally:
+                            try:
+                                os.remove(output_file)
+                            except Exception as clean_error:
+                                print(f"Erreur de suppression du fichier: {str(clean_error)}")
             
             await status_msg.delete()
             
         except Exception as e:
             await status_msg.edit(f"❌ Erreur de compression: {str(e)}")
+            await client.send_message(
+                chat_id=user.id,
+                text=f"❌ Échec de la compression: {str(e)}"
+            )
         
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
-            if os.path.exists(user_dir):
-                os.rmdir(user_dir)
+            for root, _, files in os.walk(user_dir):
+                for file in files:
+                    try:
+                        os.remove(os.path.join(root, file))
+                    except:
+                        pass
+            os.rmdir(user_dir)
         except Exception as e:
             print(f"Erreur de nettoyage: {str(e)}")
-        finally:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                for root, _, files in os.walk(user_dir):
-                    for file in files:
-                        try:
-                            os.remove(os.path.join(root, file))
-                        except:
-                            pass
-                os.rmdir(user_dir)
-            except Exception as e:
-                print(f"Erreur de nettoyage: {str(e)}")
 
 
     elif data == "close":
@@ -267,29 +295,36 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         try:
             await callback_query.answer("⏳ Découpage en préparation...")
             
-            # Vérification du fichier source
             if not msg.reply_to_message or not (msg.reply_to_message.video or msg.reply_to_message.document):
                 await callback_query.answer("❌ Aucun fichier vidéo trouvé", show_alert=True)
                 return
             
-            # Création du dossier utilisateur
             user_dir = f"downloads/{user.id}_{int(time.time())}"
             os.makedirs(user_dir, exist_ok=True)
-            ext = None
             
-            # Téléchargement du fichier
             try:
                 status_msg = await msg.edit("⏳ Téléchargement en cours...")
             except MessageIdInvalid:
                 status_msg = await msg.reply("⏳ Téléchargement en cours...")
             
             try:
+                original_filename = None
+                if msg.reply_to_message.document:
+                    original_filename = msg.reply_to_message.document.file_name
+                elif msg.reply_to_message.video:
+                    original_filename = msg.reply_to_message.video.file_name
+                
+                if original_filename:
+                    filename_without_ext = os.path.splitext(original_filename)[0]
+                    download_filename = f"{user_dir}/{filename_without_ext}_original{os.path.splitext(original_filename)[1] or '.mp4'}"
+                else:
+                    download_filename = f"{user_dir}/original.mp4"
+                
                 file_path = await msg.reply_to_message.download(
-                    file_name=f"{user_dir}/original.mp4",
+                    file_name=download_filename,
                     progress=progress_for_pyrogram,
                     progress_args=("Téléchargement...", status_msg, time.time())
                 )
-                ext = file_path.split(".")[-1]
             except Exception as e:
                 await status_msg.edit(f"❌ Erreur de téléchargement: {str(e)}")
                 try:
@@ -299,16 +334,15 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 return
 
             cut_instructions = (
-                "✂️ <b>Format attendu</b> : <code>HH:MM:SS-HH:MM:SS,HH:MM:SS-HH:MM:SS,...</code>\n"
-                "Par exemple :\n"
+                "✂️ <b>Format attendu</b> : <code>HH:MM:SS-HH:MM:SS,HH:MM:SS-HH:MM:SS,...</code>\n\n"
+                "Exemple :\n"
                 "<code>00:01:30-00:02:45,00:03:00-00:04:15</code> pour deux séquences\n\n"
-                "Envoyez maintenant les temps de découpage séparés par des virgules :"
+                "Envoyez maintenant les temps de découpage :"
             )
             
             cut_time_msg = await status_msg.edit(cut_instructions)
             
             try:
-                # Attente de la réponse utilisateur
                 response = await client.listen(
                     filters.text & filters.user(user.id),
                     timeout=120
@@ -326,9 +360,9 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     
                     def validate_time(time_str):
                         parts = time_str.split(":")
-                        if len(parts) == 3: 
+                        if len(parts) == 3:  # HH:MM:SS
                             return True
-                        elif len(parts) == 2: 
+                        elif len(parts) == 2:  # MM:SS
                             return True
                         return False
                         
@@ -353,32 +387,56 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 videoclient = deps.videoclient
                 videoclient.output_path = Path(user_dir)
                 
-                await status_msg.edit("⚙️ Découpage en cours...")
-                
                 result = await videoclient.cut_video(
                     input_path=file_path,
                     output_name="cut",
                     cut_ranges=cut_ranges, 
                 )
                 
-                # Envoi des résultats
-                await client.send_video(
-                    chat_id=user.id,
-                    video=result,
-                    caption=f"📦 Vidéo découpée ({len(cut_ranges)} plage(s)) : {os.path.basename(result)}",
-                    progress=progress_for_pyrogram,
-                    progress_args=("Envoi...", status_msg, time.time())
-                )
-                await asyncio.sleep(3)
                 try:
-                    os.remove(result)
-                except:
-                    pass
+                    result_media_info = await videoclient.get_media_info(result)
+                    width = result_media_info.width if result_media_info and hasattr(result_media_info, 'width') else 320
+                    height = result_media_info.height if result_media_info and hasattr(result_media_info, 'height') else None
+                    duration = int(result_media_info.duration) if result_media_info and hasattr(result_media_info, 'duration') else 0
+                except Exception as e:
+                    print(f"⚠️ Erreur infos média résultat: {str(e)}")
+                    width = 320
+                    height = None
+                    duration = 0
+                
+                if os.path.exists(result):
+                    try:
+                        await client.send_video(
+                            chat_id=user.id,
+                            video=result,
+                            width=width,
+                            height=height,
+                            duration=duration,
+                            caption=f"✂️ Vidéo découpée ({len(cut_ranges)} plage(s))",
+                            progress=progress_for_pyrogram,
+                            progress_args=("Envoi...", status_msg, time.time())
+                        )
+                        await asyncio.sleep(1)
+                    except Exception as send_error:
+                        await status_msg.edit(f"❌ Erreur d'envoi: {str(send_error)}")
+                        await client.send_message(
+                            chat_id=user.id,
+                            text=f"❌ Impossible d'envoyer la vidéo: {str(send_error)}"
+                        )
+                    finally:
+                        try:
+                            os.remove(result)
+                        except Exception as clean_error:
+                            print(f"Erreur suppression fichier: {str(clean_error)}")
                 
                 await status_msg.delete()
                 
             except Exception as e:
                 await status_msg.edit(f"❌ Erreur de découpage: {str(e)}")
+                await client.send_message(
+                    chat_id=user.id,
+                    text=f"❌ Échec du découpage: {str(e)}"
+                )
                 
         finally:
             try:
@@ -582,7 +640,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 
                 await status_msg.edit(
                     text=info_text,
-                    reply_markup=main_menu(),
                     disable_web_page_preview=True
                 )
                 
@@ -740,8 +797,20 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 status_msg = await msg.reply("⏳ Téléchargement en cours...")
             
             try:
+                original_filename = None
+                if msg.reply_to_message.document:
+                    original_filename = msg.reply_to_message.document.file_name
+                elif msg.reply_to_message.video:
+                    original_filename = msg.reply_to_message.video.file_name
+                
+                if original_filename:
+                    filename_without_ext = os.path.splitext(original_filename)[0]
+                    download_filename = f"{user_dir}/{filename_without_ext}_original{os.path.splitext(original_filename)[1] or '.mp4'}"
+                else:
+                    download_filename = f"{user_dir}/original.mp4"
+                
                 file_path = await msg.reply_to_message.download(
-                    file_name=f"{user_dir}/original.mp4",
+                    file_name=download_filename,
                     progress=progress_for_pyrogram,
                     progress_args=("Téléchargement...", status_msg, time.time())
                 )
@@ -753,9 +822,18 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     pass
                 return
 
+            try:
+                videoclient = deps.videoclient
+                original_media_info = await videoclient.get_media_info(file_path)
+                original_duration = int(original_media_info.duration) if original_media_info and hasattr(original_media_info, 'duration') else 0
+            except Exception as e:
+                print(f"⚠️ Erreur lecture infos média originales: {str(e)}")
+                original_duration = 0
+
             trim_instructions = (
                 "✂️ <b>Format attendu</b> : <code>HH:MM:SS-HH:MM:SS</code>\n"
-                "Par exemple :\n"
+                f"Durée totale: {seconds_to_timestamp(original_duration)}\n\n"
+                "Exemple :\n"
                 "<code>00:01:30-00:02:45</code> pour une séquence\n\n"
                 "Envoyez maintenant le temps de découpage :"
             )
@@ -763,7 +841,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             await status_msg.edit(trim_instructions)
             
             try:
-                # Attente de la réponse utilisateur
                 response = await client.listen(
                     filters.text & filters.user(user.id),
                     timeout=120
@@ -796,9 +873,12 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     await status_msg.edit("❌ Le temps de fin doit être après le temps de début")
                     return
                     
+                if original_duration > 0 and end_time > original_duration:
+                    await status_msg.edit(f"❌ La fin ({end_time_str}) dépasse la durée totale ({seconds_to_timestamp(original_duration)})")
+                    return
+                    
                 await status_msg.edit(f"✂️ Découpage de {start_time_str} à {end_time_str}...")
                 
-                videoclient = deps.videoclient
                 videoclient.output_path = Path(user_dir)
                 
                 result = await videoclient.trim_video(
@@ -808,27 +888,55 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     end_time=end_time
                 )
                 
-                if not result:
+                if not result or not os.path.exists(result):
                     await status_msg.edit("❌ Échec du découpage vidéo")
                     return
                     
-                # Envoi du résultat
-                await client.send_video(
-                    chat_id=user.id,
-                    video=result,
-                    caption=f"✂️ Vidéo découpée: {start_time_str} à {end_time_str}",
-                    progress=progress_for_pyrogram,
-                    progress_args=("Envoi...", status_msg, time.time())
-                )
+                try:
+                    result_media_info = await videoclient.get_media_info(result)
+                    width = result_media_info.width if result_media_info and hasattr(result_media_info, 'width') else 320
+                    height = result_media_info.height if result_media_info and hasattr(result_media_info, 'height') else None
+                    duration = int(result_media_info.duration) if result_media_info and hasattr(result_media_info, 'duration') else (end_time - start_time)
+                except Exception as e:
+                    print(f"⚠️ Erreur lecture infos média résultat: {str(e)}")
+                    width = 320
+                    height = None
+                    duration = end_time - start_time 
                 
-                await status_msg.edit("✅ Découpage terminé avec succès!")
-                await asyncio.sleep(2)
+                try:
+                    await client.send_video(
+                        chat_id=user.id,
+                        video=result,
+                        width=width,
+                        height=height,
+                        duration=duration,
+                        caption=f"✂️ Vidéo découpée: {start_time_str} à {end_time_str}",
+                        progress=progress_for_pyrogram,
+                        progress_args=("Envoi...", status_msg, time.time())
+                    )
+                    await asyncio.sleep(1)
+                except Exception as send_error:
+                    await status_msg.edit(f"❌ Erreur d'envoi: {str(send_error)}")
+                    await client.send_message(
+                        chat_id=user.id,
+                        text=f"❌ Impossible d'envoyer la vidéo: {str(send_error)}"
+                    )
+                finally:
+                    try:
+                        os.remove(result)
+                    except Exception as clean_error:
+                        print(f"Erreur suppression fichier: {str(clean_error)}")
+                
                 await status_msg.delete()
                 
             except asyncio.TimeoutError:
                 await status_msg.edit("❌ Temps écoulé (120s)")
             except Exception as e:
                 await status_msg.edit(f"❌ Erreur: {str(e)}")
+                await client.send_message(
+                    chat_id=user.id,
+                    text=f"❌ Échec du découpage: {str(e)}"
+                )
         finally:
             try:
                 if os.path.exists(file_path):
@@ -848,7 +956,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         try:
             await callback_query.answer("⏳ Fusion vidéo en préparation...")
             
-            # Vérifier qu'on a au moins une vidéo dans le message reply
             if not msg.reply_to_message or not (msg.reply_to_message.video or msg.reply_to_message.document):
                 await callback_query.answer("❌ Répondez à une vidéo pour commencer", show_alert=True)
                 return
@@ -861,10 +968,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             except MessageIdInvalid:
                 status_msg = await msg.reply("⏳ Téléchargement de la première vidéo...")
             
-            # Télécharger la première vidéo (celle à laquelle on a répondu)
             try:
+                original_filename = None
+                if msg.reply_to_message.document:
+                    original_filename = msg.reply_to_message.document.file_name
+                elif msg.reply_to_message.video:
+                    original_filename = msg.reply_to_message.video.file_name
+                
+                if original_filename:
+                    filename_without_ext = os.path.splitext(original_filename)[0]
+                    first_video_path = f"{user_dir}/{filename_without_ext}_0{os.path.splitext(original_filename)[1] or '.mp4'}"
+                else:
+                    first_video_path = f"{user_dir}/video_0.mp4"
+                
                 first_video_path = await msg.reply_to_message.download(
-                    file_name=f"{user_dir}/video_0.mp4",
+                    file_name=first_video_path,
                     progress=progress_for_pyrogram,
                     progress_args=("Téléchargement vidéo 1...", status_msg, time.time())
                 )
@@ -876,23 +994,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     pass
                 return
 
-            # Stocker les infos temporaires
             users_operations[user.id] = {
                 'dir': user_dir,
                 'video_paths': [first_video_path],
-                'status_msg': status_msg
+                'status_msg': status_msg,
+                'original_filenames': [original_filename] if original_filename else []
             }
             
-            # Demander les vidéos supplémentaires
             await status_msg.edit(
                 "📹 <b>Fusion vidéo</b>\n\n"
-                f"1. {os.path.basename(first_video_path)} (vidéo de départ)\n\n"
+                f"1. {original_filename or os.path.basename(first_video_path)} (vidéo de départ)\n\n"
                 "Envoyez maintenant les autres vidéos à fusionner (une par message)\n\n"
                 "Tapez /done quand vous avez terminé\n"
                 "Tapez /cancel pour annuler"
             )
             
-            # Écouter les nouvelles vidéos
             while True:
                 try:
                     response = await client.listen(
@@ -911,20 +1027,33 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                             return
                         continue
                     
-                    # Télécharger la nouvelle vidéo
                     try:
                         video_num = len(users_operations[user.id]['video_paths'])
+                        original_filename = None
+                        if response.document:
+                            original_filename = response.document.file_name
+                        elif response.video:
+                            original_filename = response.video.file_name
+                        
+                        if original_filename:
+                            filename_without_ext = os.path.splitext(original_filename)[0]
+                            new_video_path = f"{user_dir}/{filename_without_ext}_{video_num}{os.path.splitext(original_filename)[1] or '.mp4'}"
+                        else:
+                            new_video_path = f"{user_dir}/video_{video_num}.mp4"
+                        
                         new_video_path = await response.download(
-                            file_name=f"{user_dir}/video_{video_num}.mp4",
+                            file_name=new_video_path,
                             progress=progress_for_pyrogram,
                             progress_args=(f"Téléchargement vidéo {video_num+1}...", status_msg, time.time())
                         )
                         users_operations[user.id]['video_paths'].append(new_video_path)
+                        if original_filename:
+                            users_operations[user.id]['original_filenames'].append(original_filename)
                         
                         await response.delete()
                         
                         video_list = "\n".join(
-                            f"{i+1}. {os.path.basename(p)}"
+                            f"{i+1}. {users_operations[user.id]['original_filenames'][i] if i < len(users_operations[user.id]['original_filenames']) else os.path.basename(p)}"
                             for i, p in enumerate(users_operations[user.id]['video_paths'])
                         )
                         await status_msg.edit(
@@ -941,9 +1070,10 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 except asyncio.TimeoutError:
                     await status_msg.edit("⌛ Temps écoulé - opération annulée")
                     return
+            await response.delete()
 
             await status_msg.edit(
-                    "🛠 <b>Choisissez l'extension de sorti :</b>\n\n"
+                    "🛠 <b>Choisissez l'extension de sortie :</b>\n\n"
                     "Options disponibles : `MP4` `MKV` `AVI` \n\n"
                     "Envoyer `!annuler` pour annuler\n\n"
                     "Répondez avec le nom du format souhaité :"
@@ -962,7 +1092,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 
                 await format_response.delete()
                 
-                # Demander la durée de transition
                 await status_msg.edit(
                     "⏳ <b>Durée de transition entre les vidéos (en secondes) :</b>\n\n"
                     "Entrez un nombre entre 0 et 5 (0 pour pas de transition) :"
@@ -981,7 +1110,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     await status_msg.edit("❌ Durée invalide. Utilisez un nombre entre 0 et 5")
                     return
                 await transition_response.delete()
-                # Lancer la fusion
+                
                 await status_msg.edit("⚙️ Fusion des vidéos en cours...")
                 
                 videoclient = deps.videoclient
@@ -994,18 +1123,44 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     transition_duration=transition_duration
                 )
                 
-                if not result:
+                if not result or not os.path.exists(result):
                     await status_msg.edit("❌ Échec de la fusion des vidéos")
                     return
                     
-                # Envoyer le résultat
-                await client.send_video(
-                    chat_id=user.id,
-                    video=result,
-                    caption=f"📼 Vidéo fusionnée ({len(users_operations[user.id]['video_paths'])} clips)",
-                    progress=progress_for_pyrogram,
-                    progress_args=("Envoi...", status_msg, time.time())
-                )
+                try:
+                    result_media_info = await videoclient.get_media_info(result)
+                    width = result_media_info.width if result_media_info and hasattr(result_media_info, 'width') else 1280
+                    height = result_media_info.height if result_media_info and hasattr(result_media_info, 'height') else 720
+                    duration = int(result_media_info.duration) if result_media_info and hasattr(result_media_info, 'duration') else 0
+                except Exception as e:
+                    print(f"⚠️ Erreur lecture infos média résultat: {str(e)}")
+                    width = 1280
+                    height = 720
+                    duration = 0
+                
+                try:
+                    await client.send_video(
+                        chat_id=user.id,
+                        video=result,
+                        width=width,
+                        height=height,
+                        duration=duration,
+                        caption=f"📼 Vidéo fusionnée ({len(users_operations[user.id]['video_paths'])} clips)",
+                        progress=progress_for_pyrogram,
+                        progress_args=("Envoi...", status_msg, time.time())
+                    )
+                    await asyncio.sleep(1)
+                except Exception as send_error:
+                    await status_msg.edit(f"❌ Erreur d'envoi: {str(send_error)}")
+                    await client.send_message(
+                        chat_id=user.id,
+                        text=f"❌ Impossible d'envoyer la vidéo: {str(send_error)}"
+                    )
+                finally:
+                    try:
+                        os.remove(result)
+                    except Exception as clean_error:
+                        print(f"Erreur suppression fichier: {str(clean_error)}")
                 
                 await status_msg.edit("✅ Fusion terminée avec succès!")
                 await asyncio.sleep(2)
@@ -1015,8 +1170,11 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 await status_msg.edit("⌛ Temps écoulé - opération annulée")
             except Exception as e:
                 await status_msg.edit(f"❌ Erreur: {str(e)}")
+                await client.send_message(
+                    chat_id=user.id,
+                    text=f"❌ Échec de la fusion: {str(e)}"
+                )
         finally:
-            # Nettoyage
             if user.id in users_operations:
                 try:
                     for path in users_operations[user.id]['video_paths']:

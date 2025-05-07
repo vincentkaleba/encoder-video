@@ -101,3 +101,17 @@ def convert_to_seconds(time_str: str) -> float:
         return minutes * 60 + seconds
     else:
         raise ValueError("Format de temps invalide")
+
+def convert_to_seconds(time_str):
+    parts = list(map(int, time_str.split(":")))
+    if len(parts) == 3:  # HH:MM:SS
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    elif len(parts) == 2:  # MM:SS
+        return parts[0] * 60 + parts[1]
+    return 0
+
+def seconds_to_timestamp(seconds):
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
