@@ -6,7 +6,7 @@ import shutil
 import time
 from typing import Dict
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, KeyboardButton, ReplyKeyboardMarkup
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageIdInvalid
 from bot import Dependencies
@@ -2286,99 +2286,93 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 print(f"Erreur de nettoyage: {str(e)}")
     
     elif data in ["choose_subtitle", "choose_subtitle_burn"]:
+        status_msg = None
         try:
             await callback_query.answer("⏳ Traitement des sous-titres en cours...")
-            
+
             if not msg.reply_to_message:
                 await callback_query.answer("❌ Aucun message auquel répondre", show_alert=True)
                 return
-                
+
             reply_msg = msg.reply_to_message
             if not (reply_msg.video or (reply_msg.document and reply_msg.document.mime_type.startswith('video/'))):
                 await callback_query.answer("❌ Aucun fichier vidéo valide trouvé", show_alert=True)
                 return
-            
+
             user_dir = f"downloads/{user.id}_{int(time.time())}"
             os.makedirs(user_dir, exist_ok=True)
-            
+
             try:
                 status_msg = await msg.edit("⏳ Téléchargement de la vidéo...")
             except MessageIdInvalid:
                 status_msg = await msg.reply("⏳ Téléchargement de la vidéo...")
-            
+
             try:
                 if reply_msg.video:
                     original_filename = reply_msg.video.file_name or "video.mp4"
                 else:
                     original_filename = reply_msg.document.file_name or "video.mp4"
-                
+
                 input_path = await reply_msg.download(
                     file_name=f"{user_dir}/{original_filename}",
                     progress=progress_for_pyrogram,
                     progress_args=("Téléchargement...", status_msg, time.time())
                 )
-                
+
                 videoclient = deps.videoclient
                 media_info = await videoclient.get_media_info(input_path)
-                
+
                 if not media_info:
                     await status_msg.edit("❌ Impossible d'analyser le fichier vidéo")
                     return
-                    
+
                 duration = int(media_info.duration) if media_info.duration else 0
                 width = media_info.width if media_info.width else 1280
                 height = media_info.height if media_info.height else 720
-                
+
             except Exception as e:
                 await status_msg.edit(f"❌ Erreur de téléchargement: {str(e)}")
-                try:
-                    shutil.rmtree(user_dir, ignore_errors=True)
-                except:
-                    pass
+                shutil.rmtree(user_dir, ignore_errors=True)
                 return
-            
+
             if not media_info.subtitle_tracks:
                 await status_msg.edit("❌ Aucune piste de sous-titres détectée dans le fichier")
-                try:
-                    shutil.rmtree(user_dir, ignore_errors=True)
-                except:
-                    pass
+                shutil.rmtree(user_dir, ignore_errors=True)
                 return
-                
+
             subtitle_options = []
             lang_counter = {}
-            
-            for index, track in enumerate(media_info.subtitle_tracks): 
+
+            for index, track in enumerate(media_info.subtitle_tracks):
                 lang = track.language.lower() if track.language else "inconnu"
                 lang_counter[lang] = lang_counter.get(lang, 0) + 1
                 count = lang_counter[lang]
-                
                 display_name = f"{lang.capitalize()} ({count})" if count > 1 else lang.capitalize()
                 subtitle_options.append({
-                    'index': index, 
-                    'lang_code': lang, 
+                    'index': index,
+                    'lang_code': lang,
                     'display': display_name
                 })
-            
+
             keyboard = []
             current_row = []
             for i, option in enumerate(subtitle_options):
-                current_row.append(KeyboardButton(option['display']))
-                if (i + 1) % 2 == 0 or i == len(subtitle_options) - 1:
+                current_row.append(KeyboardButton(text=option['display']))
+                if (i + 1) % 2 == 0 or i + 1 == len(subtitle_options):
                     keyboard.append(current_row)
                     current_row = []
-            
-            keyboard.append([KeyboardButton("❌ Annuler")])
-            
+
+            keyboard.append([KeyboardButton(text="❌ Annuler")])
+
             reply_markup = ReplyKeyboardMarkup(
                 keyboard=keyboard,
                 resize_keyboard=True,
                 one_time_keyboard=True
             )
-            
+
             action = "brûler" if data == "choose_subtitle_burn" else "sélectionner"
             languages_text = "\n".join(f"- {opt['display']}" for opt in subtitle_options)
-            
+
             await status_msg.edit(
                 f"🎬 <b>Choisissez la piste de sous-titres à {action}</b>\n\n"
                 f"📹 Fichier: {original_filename}\n"
@@ -2387,56 +2381,45 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 f"Pistes disponibles (index FFmpeg):\n{languages_text}",
                 reply_markup=reply_markup
             )
-            
+
             try:
                 response = await client.listen(
-                    filters=(filters.text & 
-                        filters.user(user.id)),
+                    filters=(filters.text & filters.user(user.id)),
                     timeout=120
                 )
-                
+
                 if response.text.strip().lower() in ("❌ annuler", "/cancel"):
-                    await status_msg.edit("❌ Opération annulée", reply_markup=None)
-                    try:
-                        await response.delete()
-                    except:
-                        pass
+                    await msg.reply("❌ Opération annulée", reply_markup=ReplyKeyboardRemove())
+                    await response.delete()
                     return
-                    
+
                 selected_display = response.text.strip()
-                selected_option = None
-                
-                for opt in subtitle_options:
-                    if opt['display'] == selected_display:
-                        selected_option = opt
-                        break
-                
+                selected_option = next((opt for opt in subtitle_options if opt['display'] == selected_display), None)
+
                 if not selected_option:
-                    await status_msg.edit("❌ Sélection invalide", reply_markup=None)
-                    try:
-                        await response.delete()
-                    except:
-                        pass
+                    await msg.reply("❌ Sélection invalide", reply_markup=ReplyKeyboardRemove())
+                    await response.delete()
                     return
-                    
+
                 await response.delete()
-                
+                await status_msg.delete()
+
                 selected_lang = selected_option['lang_code']
-                track_index = selected_option['index'] 
-                
-                await status_msg.edit(
-                    f"⚙️ {action.capitalize()} la piste {selected_lang.capitalize()} (Index: {track_index})...", 
-                    reply_markup=None
+                track_index = selected_option['index'] + 1
+
+                status_msg = await msg.reply(
+                    f"⚙️ {action.capitalize()} la piste {selected_lang.capitalize()} (Index: {track_index})...",
+                    reply_markup=ReplyKeyboardRemove()
                 )
-                
+
                 output_name = f"output_{selected_lang}_{int(time.time())}"
-                
+
                 if data == "choose_subtitle":
                     result = await videoclient.choose_subtitle(
                         input_path=input_path,
                         output_name=output_name,
                         language=selected_lang,
-                        index=track_index, 
+                        index=track_index,
                         make_default=True,
                     )
                 else:
@@ -2444,21 +2427,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                         input_path=input_path,
                         output_name=output_name,
                         language=selected_lang,
-                        index=track_index,  
+                        index=track_index,
                     )
-                
+
                 if not result:
                     await status_msg.edit(f"❌ Échec du traitement de la piste {track_index}")
                     return
-                
+
                 result_info = await videoclient.get_media_info(result)
                 result_width = result_info.width if result_info else width
                 result_height = result_info.height if result_info else height
                 result_duration = int(result_info.duration) if result_info and result_info.duration else duration
-                
+
                 caption_action = "brûlés" if data == "choose_subtitle_burn" else "ajoutés"
                 caption = f"🎬 Vidéo avec sous-titres {selected_lang.capitalize()} {caption_action} (Piste {track_index})"
-                
+
                 await client.send_video(
                     chat_id=user.id,
                     video=result,
@@ -2469,29 +2452,24 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     progress=progress_for_pyrogram,
                     progress_args=("Envoi...", status_msg, time.time())
                 )
-                
-                await status_msg.edit(f"✅ Piste {track_index} {action} avec succès!")
-                await asyncio.sleep(2)
                 await status_msg.delete()
-                
+                await msg.reply(f"✅ Piste {track_index} {action} avec succès!")
+
             except asyncio.TimeoutError:
-                await status_msg.edit("⌛ Temps écoulé - opération annulée", reply_markup=None)
+                await msg.reply("⌛ Temps écoulé - opération annulée", reply_markup=ReplyKeyboardRemove())
             except Exception as e:
-                await status_msg.edit(f"❌ Erreur: {str(e)}", reply_markup=None)
-                
+                await msg.reply(f"❌ Erreur: {str(e)}", reply_markup=ReplyKeyboardRemove())
+
         finally:
             try:
                 for file in [locals().get("input_path"), locals().get("result")]:
                     if file and os.path.exists(file):
-                        try:
-                            os.remove(file)
-                        except:
-                            pass
-                
+                        os.remove(file)
                 if os.path.exists(user_dir):
                     shutil.rmtree(user_dir, ignore_errors=True)
             except Exception as e:
                 print(f"Erreur lors du nettoyage: {str(e)}")
+
     
     elif data in ["add_chapters", "edit_chapter", "split_chapter", "remove_chapters", "get_chapters", "get_chapter"]:
         # Variables à nettoyer
@@ -2624,7 +2602,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     )
                     
                     if response.text.strip().lower() in ("❌ annuler", "/cancel"):
-                        await status_msg.edit("❌ Opération annulée", reply_markup=None)
+                        await status_msg.edit("❌ Opération annulée", reply_markup=ReplyKeyboardRemove())
                         return
                         
                     try:
@@ -2638,12 +2616,12 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                             f"Titre: {chapter.get('title', 'Sans titre')}\n"
                             f"Début: {chapter['start']}\n"
                             f"Fin: {chapter['end']}",
-                            reply_markup=None
+                            reply_markup=ReplyKeyboardRemove()
                         )
                     except (ValueError, IndexError):
-                        await status_msg.edit("❌ Numéro de chapitre invalide", reply_markup=None)
+                        await status_msg.edit("❌ Numéro de chapitre invalide", reply_markup=ReplyKeyboardRemove())
                 except asyncio.TimeoutError:
-                    await status_msg.edit("⌛ Temps écoulé", reply_markup=None)
+                    await status_msg.edit("⌛ Temps écoulé", reply_markup=ReplyKeyboardRemove())
                 return
                 
             elif data == "remove_chapters":
@@ -2801,7 +2779,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     )
                     
                     if response.text.strip().lower() in ("❌ annuler", "/cancel"):
-                        await status_msg.edit("❌ Opération annulée", reply_markup=None)
+                        await status_msg.edit("❌ Opération annulée", reply_markup=ReplyKeyboardRemove())
                         return
                         
                     try:
@@ -2816,7 +2794,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                             "1. Nouveau titre (optionnel)\n"
                             "2. Nouveau début (HH:MM:SS, optionnel)\n"
                             "3. Nouvelle fin (HH:MM:SS, optionnel)",
-                            reply_markup=None
+                            reply_markup=ReplyKeyboardRemove()
                         )
                         
                         edit_data = await client.listen(
@@ -2867,11 +2845,11 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                         )
                         
                     except (ValueError, IndexError) as e:
-                        await status_msg.edit(f"❌ Erreur: {str(e)}", reply_markup=None)
+                        await status_msg.edit(f"❌ Erreur: {str(e)}", reply_markup=ReplyKeyboardRemove())
                         return
                         
                 except asyncio.TimeoutError:
-                    await status_msg.edit("⌛ Temps écoulé", reply_markup=None)
+                    await status_msg.edit("⌛ Temps écoulé", reply_markup=ReplyKeyboardRemove())
                     return
                     
             elif data == "split_chapter":
@@ -2904,7 +2882,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     )
                     
                     if response.text.strip().lower() in ("❌ annuler", "/cancel"):
-                        await status_msg.edit("❌ Opération annulée", reply_markup=None)
+                        await status_msg.edit("❌ Opération annulée", reply_markup=ReplyKeyboardRemove())
                         return
                         
                     try:
@@ -2916,7 +2894,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                             f"Titre: {selected_chapter.get('title', 'Sans titre')}\n"
                             f"Actuel: {selected_chapter['start']} à {selected_chapter['end']}\n\n"
                             "Entrez l'heure de division (HH:MM:SS):",
-                            reply_markup=None
+                            reply_markup=ReplyKeyboardRemove()
                         )
                         
                         split_msg = await client.listen(
@@ -2958,11 +2936,11 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                         )
                         
                     except (ValueError, IndexError) as e:
-                        await status_msg.edit(f"❌ Erreur: {str(e)}", reply_markup=None)
+                        await status_msg.edit(f"❌ Erreur: {str(e)}", reply_markup=ReplyKeyboardRemove())
                         return
                         
                 except asyncio.TimeoutError:
-                    await status_msg.edit("⌛ Temps écoulé", reply_markup=None)
+                    await status_msg.edit("⌛ Temps écoulé", reply_markup=ReplyKeyboardRemove())
                     return
             
             await status_msg.edit("✅ Opération terminée avec succès!")

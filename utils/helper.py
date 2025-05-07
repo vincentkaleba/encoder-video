@@ -38,7 +38,8 @@ async def progress_for_pyrogram(current: int, total: int, ud_type: str, message,
                 text=f"{ud_type}\n\n{progress_bar}\n\n{progress_text}",
             )
         except Exception as e:
-            print(f"Erreur lors de la mise à jour de la progression : {e}")
+            # print(f"Erreur lors de la mise à jour de la progression : {e}")
+            pass
 
 def human_readable_size(size: int) -> str:
     if size is None or size == 0:
