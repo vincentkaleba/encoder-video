@@ -254,6 +254,10 @@ class VideoClient:
         self._ffmpeg_version: Optional[str] = None
         self._ffprobe_version: Optional[str] = None
         
+<<<<<<< HEAD
+=======
+        # Setup components in optimal order
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
         self._setup_output_dir()
         self.logger = self._setup_optimized_logger()
         self._verify_ffmpeg()
@@ -273,11 +277,19 @@ class VideoClient:
         """Configure and return an optimized logger instance."""
         logger = logging.getLogger(f"VideoClient_{hash(self.name)}")
         
+<<<<<<< HEAD
+=======
+        # Avoid duplicate handlers
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
         if logger.handlers:
             return logger
             
         logger.setLevel(logging.INFO)
+<<<<<<< HEAD
         logger.propagate = False  
+=======
+        logger.propagate = False  # Prevent propagation to root logger
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
         
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -287,12 +299,21 @@ class VideoClient:
         ch.setFormatter(formatter)
         logger.addHandler(ch)
         
+<<<<<<< HEAD
+=======
+        # File handler with rotation (only if output path is writable)
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
         try:
             log_file = self.output_path / f"{self.name}.log"
             fh = logging.handlers.RotatingFileHandler(
                 log_file,
+<<<<<<< HEAD
                 maxBytes=5*1024*1024,
                 backupCount=2          
+=======
+                maxBytes=5*1024*1024,  # Reduced to 5MB
+                backupCount=2           # Reduced backup count
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
             )
             fh.setFormatter(formatter)
             logger.addHandler(fh)
@@ -320,6 +341,7 @@ class VideoClient:
         except Exception as e:
             self.logger.error(f"FFprobe verification failed: {str(e)}")
             raise RuntimeError("FFprobe is required for media analysis") from e
+<<<<<<< HEAD
     
     def _verify_ffmpeg(self):
             """Verify FFmpeg installation with minimal resource usage."""
@@ -341,6 +363,9 @@ class VideoClient:
                 self.logger.error(f"FFmpeg verification failed: {str(e)}")
                 raise RuntimeError("FFmpeg is required for media processing") from e   
                      
+=======
+            
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
     def _register_signal_handlers(self) -> None:
         """Register signal handlers for graceful shutdown."""
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -460,7 +485,11 @@ class VideoClient:
                     
                     if codec_type == 'video' and not hasattr(media_info, 'width'):
                         media_info.width = int(stream.get('width', 0))
+<<<<<<< HEAD
                         media_info.height = int(stream.get('height', 320))
+=======
+                        media_info.height = int(stream.get('height', 0))
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
                         if not media_info.bitrate and stream.get('bit_rate'):
                             media_info.bitrate = int(stream.get('bit_rate', 0)) // 1000
                     
@@ -501,6 +530,7 @@ class VideoClient:
         }
         
         return AudioTrack(
+<<<<<<< HEAD
             index=(stream.get('audio_tracks', 0)) + 1, 
             language=stream.get('tags', {}).get('language', 'und'),
             codec=codec_map.get(codec_name, AudioCodec.AAC),
@@ -509,6 +539,15 @@ class VideoClient:
         )
 
 
+=======
+            index=len(self.audio_tracks) + 1,
+            language=stream.get('tags', {}).get('language', 'und'),
+            codec=codec_map.get(codec_name, AudioCodec.AAC),
+            channels=int(stream.get('channels', 2)),
+            is_default=bool(stream.get('disposition', {}).get('default'))
+        )
+
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
     def _parse_subtitle_stream(self, stream: dict) -> SubtitleTrack:
         """Helper to parse subtitle stream data efficiently."""
         codec_name = stream.get('codec_name', '').lower()
@@ -516,6 +555,7 @@ class VideoClient:
             'mov_text': SubtitleCodec.MOV_TEXT,
             'srt': SubtitleCodec.SRT,
             'hdmv_pgs_subtitle': SubtitleCodec.PGS,
+<<<<<<< HEAD
             'dvd_subtitle': SubtitleCodec.VOBSUB,
             'subrip': SubtitleCodec.SUBRIP,
             'ass': SubtitleCodec.ASS,        
@@ -532,6 +572,19 @@ class VideoClient:
             is_forced=bool(disposition.get('forced', False))   
         )
 
+=======
+            'dvd_subtitle': SubtitleCodec.VOBSUB
+        }
+        
+        disposition = stream.get('disposition', {})
+        return SubtitleTrack(
+            index=len(self.subtitle_tracks) + 1,
+            language=stream.get('tags', {}).get('language', 'und'),
+            codec=codec_map.get(codec_name, SubtitleCodec.SRT),
+            is_default=bool(disposition.get('default')),
+            is_forced=bool(disposition.get('forced'))
+        )
+>>>>>>> c1bdc5659d793ece734f7d7d7e948a3784cce17d
     
 
     async def extract_subtitles(self, input_path: Union[str, Path],
