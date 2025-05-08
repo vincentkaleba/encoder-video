@@ -10,7 +10,7 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageIdInvalid
 from bot import Dependencies
-from utils.videoclient import AudioCodec, MediaType, VideoClient
+from utils.videoclient import AudioCodec, AudioTrack, MediaType, VideoClient
 from utils.helper import convert_to_seconds, progress_for_pyrogram, convert_to_seconds, seconds_to_timestamp
 from pathlib import Path
 import humanize
@@ -22,8 +22,6 @@ SUPPORTED_MIME_TYPES = {
     'video/x-msvideo', 'video/x-flv', 'video/3gpp', 'video/x-ms-wmv'
 }
 SUPPORTED_EXTENSIONS = {'.mp4', '.mkv', '.mov', '.webm', '.mp3', '.avi', '.flv', '.3gp', '.wmv'}
-
-
 
 def main_menu():
     return InlineKeyboardMarkup([
@@ -2953,7 +2951,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             else:
                 await msg.edit(f"❌ Erreur: {str(e)}")
         finally:
-            # Nettoyage amélioré
             try:
                 for file in [locals().get("input_path"), 
                            locals().get("result"), 
@@ -2964,6 +2961,186 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                         except:
                             pass
                 
+                if os.path.exists(user_dir):
+                    shutil.rmtree(user_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"Erreur de nettoyage: {str(e)}")
+    
+    elif data == "audio_selection":
+        try:
+            await callback_query.answer("🔊 Traitement des pistes audio en cours...")
+            
+            if not msg.reply_to_message or not (msg.reply_to_message.video or 
+                                            (msg.reply_to_message.document and 
+                                            msg.reply_to_message.document.mime_type.startswith('video/'))):
+                await callback_query.answer("❌ Aucun fichier vidéo valide", show_alert=True)
+                return
+
+            user_dir = f"downloads/{user.id}_{int(time.time())}"
+            os.makedirs(user_dir, exist_ok=True)
+            reply_msg = msg.reply_to_message
+            
+            try:
+                try:
+                    status_msg = await msg.edit("⏳ Analyse du fichier...")
+                except MessageIdInvalid:
+                    status_msg = await msg.reply("⏳ Analyse du fichier...")
+                
+                original_filename = (reply_msg.video.file_name if reply_msg.video 
+                                else reply_msg.document.file_name) or "video.mp4"
+                input_path = await reply_msg.download(
+                    file_name=f"{user_dir}/{original_filename}",
+                    progress=progress_for_pyrogram,
+                    progress_args=("Téléchargement...", status_msg, time.time())
+                )
+                
+                videoclient = deps.videoclient
+                media_info = await videoclient.get_media_info(input_path)
+                
+                if not media_info or not hasattr(media_info, 'audio_tracks'):
+                    await status_msg.edit("❌ Format non supporté ou fichier corrompu")
+                    return
+                    
+                duration = int(media_info.duration) if media_info.duration else 0
+                
+                if not media_info.audio_tracks:
+                    await status_msg.edit("ℹ️ Aucune piste audio détectée")
+                    return
+
+                audio_options = []
+                for track in media_info.audio_tracks:
+                    if not isinstance(track, AudioTrack):
+                        continue
+                        
+                    display_text = (
+                        f"{track.language.upper() if track.language else 'INCONNU'} "
+                        f"[Piste {track.index}] • "
+                        f"{track.codec.name} • "
+                        f"{track.channels} canaux • "
+                        f"{'DÉFAUT • ' if track.is_default else ''}"
+                        f"{track.stream_type}"
+                    )
+                    
+                    audio_options.append({
+                        'track': track,
+                        'display': display_text
+                    })
+
+                if not audio_options:
+                    await status_msg.edit("❌ Aucune piste audio valide")
+                    return
+
+                keyboard = [
+                    [KeyboardButton(opt['display'])] 
+                    for opt in audio_options
+                ]
+                keyboard.append([KeyboardButton("❌ Annuler")])
+                
+                reply_markup = ReplyKeyboardMarkup(
+                    keyboard=keyboard,
+                    resize_keyboard=True,
+                    one_time_keyboard=True
+                )
+
+                try:
+                    await status_msg.edit(
+                        "🎧 <b>Sélectionnez la piste audio principale</b>\n\n"
+                        f"📁 Fichier: {original_filename}\n"
+                        f"⏱ Durée: {duration//60}:{duration%60:02d}\n\n"
+                        "Pistes disponibles:",
+                        reply_markup=reply_markup
+                    )
+                except MessageIdInvalid:
+                    status_msg = await msg.reply(
+                        "🎧 <b>Sélectionnez la piste audio principale</b>\n\n"
+                        f"📁 Fichier: {original_filename}\n"
+                        f"⏱ Durée: {duration//60}:{duration%60:02d}\n\n"
+                        "Pistes disponibles:",
+                        reply_markup=reply_markup
+                    )
+
+                try:
+                    response = await client.listen(
+                        filters=(filters.text & filters.user(user.id)),
+                        timeout=120
+                    )
+                    
+                    if response.text.strip().lower() in ("❌ annuler", "/cancel"):
+                        await status_msg.edit("❌ Opération annulée", reply_markup=ReplyKeyboardRemove())
+                        return
+                        
+                    selected_opt = None
+                    for opt in audio_options:
+                        if opt['display'] == response.text.strip():
+                            selected_opt = opt
+                            break
+                    
+                    if not selected_opt:
+                        await status_msg.edit("❌ Sélection invalide", reply_markup=ReplyKeyboardRemove())
+                        return
+
+                    await response.delete()
+                    await status_msg.delete()
+                    selected_track = selected_opt['track']
+                    
+                    try:
+                        await status_msg.reply(
+                            f"⚙️ Traitement de la piste {selected_track.language or 'inconnu'}...",
+                            reply_markup=ReplyKeyboardRemove()
+                        )
+                    except MessageIdInvalid:
+                        status_msg = await msg.reply(
+                            f"⚙️ Traitement de la piste {selected_track.language or 'inconnu'}...",
+                            reply_markup=ReplyKeyboardRemove()
+                        )
+                    
+                    output_name = f"audio_{selected_track.index}_{int(time.time())}"
+                    
+                    result = await videoclient.choose_audio(
+                        input_path=input_path,
+                        output_name=output_name,
+                        index=selected_track.index,
+                        language=selected_track.language,
+                        make_default=True
+                    )
+                    
+                    if not result:
+                        await status_msg.reply("❌ Échec du traitement audio")
+                        return
+                        
+                    await client.send_video(
+                        chat_id=user.id,
+                        video=result,
+                        caption=(
+                            "🎵 <b>Piste audio sélectionnée</b>\n\n"
+                            f"• Langue: {selected_track.language or 'Inconnue'}\n"
+                            f"• Codec: {selected_track.codec.name}\n"
+                            f"• Canaux: {selected_track.channels}\n"
+                            f"• Piste: {selected_track.index}"
+                        ),
+                        progress=progress_for_pyrogram,
+                        progress_args=("Envoi...", status_msg, time.time())
+                    )
+                    
+                    await status_msg.reply("✅ Audio traité avec succès!")
+                    await asyncio.sleep(2)
+                    await status_msg.delete()
+                    
+                except asyncio.TimeoutError:
+                    await status_msg.reply("⌛ Temps écoulé", reply_markup=ReplyKeyboardRemove())
+                except Exception as e:
+                    await status_msg.reply(f"❌ Erreur: {str(e)}", reply_markup=ReplyKeyboardRemove())
+                    
+            except Exception as e:
+                await status_msg.reply(f"⚠️ Erreur critique: {str(e)}")
+                raise e
+                
+        finally:
+            try:
+                if 'input_path' in locals() and os.path.exists(input_path):
+                    os.remove(input_path)
+                if 'result' in locals() and os.path.exists(result):
+                    os.remove(result)
                 if os.path.exists(user_dir):
                     shutil.rmtree(user_dir, ignore_errors=True)
             except Exception as e:
