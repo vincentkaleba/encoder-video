@@ -1,7 +1,7 @@
 from pyrogram import Client
 import logging
 from typing import TYPE_CHECKING
-from data.base import MongoDB
+from data.user import BotDB
 import pyromod
 
 if TYPE_CHECKING:
@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 class Bot:
     def __init__(
         self,
-        mongo: 'MongoDB',
+        mongo: 'BotDB',
         config: 'Config',
         videoclient: 'VideoClient',
         # usermanager: 'UserManager',

@@ -1,5 +1,7 @@
 import asyncio
+import datetime
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,10 +12,12 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageIdInvalid
 from bot import Dependencies
+from data.user import SUB_CONFIG, SubType, User
 from utils.videoclient import AudioCodec, AudioTrack, MediaType, VideoClient
 from utils.helper import convert_to_seconds, progress_for_pyrogram, convert_to_seconds, seconds_to_timestamp
 from pathlib import Path
 import humanize
+log = logging.getLogger(__name__)
 
 deps = Dependencies()
 users_operations: Dict[int, dict] = {}
@@ -130,54 +134,145 @@ def info_menu():
         ]
     ])
 
-@Client.on_message(filters.document | filters.video | filters.audio & filters.private)
-async def handle_video(client: Client, message: Message):
-    file_type = None
-    file_name = None
-    
-    if message.video:
-        file_type = "video"
-        file_name = message.video.file_name or f"video_{message.id}.mp4"
-    elif message.document:
-        file_name = message.document.file_name
-        if not file_name:
-            await message.reply_text("❌ Impossible de déterminer le type de fichier")
-            return
-            
-        ext = Path(file_name).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
-            await message.reply_text(f"❌ Format non supporté: {ext}")
-            return
-            
-        mime_type = message.document.mime_type
-        if mime_type not in SUPPORTED_MIME_TYPES:
-            await message.reply_text(f"❌ Type MIME non supporté: {mime_type}")
-            return
-            
-        file_type = "video" if "video" in mime_type else "audio"
-    elif message.audio:
-        file_type = "audio"
-        file_name = message.audio.file_name or f"audio_{message.id}.mp3"
-    
-    if file_name:
-        ext = Path(file_name).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
-            await message.reply_text(f"❌ Extension non supportée: {ext}")
-            return
+@Client.on_message((filters.document | filters.video | filters.audio) & filters.private)
+async def handle_media(client: Client, message: Message):
+    """Gère la réception de fichiers multimédias et vérifie les quotas utilisateur"""
+    user = message.from_user
+    await deps.db.connect()
+    try:
         
-    await message.reply_text(
-        "🔧 Sélectionnez une opération :",
-        reply_markup=main_menu(),
-        parse_mode=ParseMode.HTML,
-        reply_to_message_id=message.id
-    )
+        user_info = await deps.db.get_user(user.id)
+        
+        if not user_info:
+            new_user = User(
+                uid=user.id,
+                fn=user.first_name,
+                ln=user.last_name or "",
+                un=user.username or "",
+                reg=datetime.datetime.now(),
+                lst=datetime.datetime.now()
+            )
+            
+            if not await deps.db.save_user(new_user):
+                raise Exception("Échec sauvegarde utilisateur")
+                
+            if not await deps.db.update_sub(user.id, SubType.FREE):
+                raise Exception("Échec attribution abonnement")
+            
+            user_info = await deps.db.get_user(user.id)
+            log.info(f"Nouvel utilisateur {user.id} créé avec {user_info.tpts} points")
 
+        sub_config = SUB_CONFIG[user_info.sub]
+        daily_usage = user_info.curr_usage()
+        remaining_files = sub_config['files'] - daily_usage.fls
+        remaining_points = sub_config['pts'] - daily_usage.pts
+
+        if not user_info.can_process(pts_needed=1):
+            msg = (
+                f"⚠️ <b>Limite journalière atteinte</b>\n\n"
+                f"• Abonnement: <b>{user_info.sub.value}</b>\n"
+                f"• Fichiers traités: <b>{daily_usage.fls}/{sub_config['files']}</b>\n"
+                f"• Points utilisés: <b>{daily_usage.pts}/{sub_config['pts'] * 30}</b>\n\n"
+                f"Capacités restantes aujourd'hui :\n"
+                f"→ Fichiers: <b>{remaining_files}</b>\n"
+                f"→ Points: <b>{user_info.tpts}</b>"
+            )
+            
+            return await message.reply_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💎 Passer Premium", callback_data="upgrade_sub")],
+                    [InlineKeyboardButton("🔄 Réinitialiser demain", callback_data="wait_reset")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+
+        file_type, file_name = None, None
+        
+        if message.video:
+            file_type = "video"
+            file_name = message.video.file_name or f"video_{message.id}.mp4"
+        elif message.audio:
+            file_type = "audio"
+            file_name = message.audio.file_name or f"audio_{message.id}.mp3"
+        elif message.document:
+            file_name = message.document.file_name
+            if not file_name:
+                return await message.reply_text("❌ Nom de fichier manquant")
+                
+            ext = Path(file_name).suffix.lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                return await message.reply_text(f"❌ Format {ext} non supporté")
+                
+            mime_type = message.document.mime_type or ""
+            if "video" in mime_type:
+                file_type = "video"
+            elif "audio" in mime_type:
+                file_type = "audio"
+            else:
+                return await message.reply_text(f"❌ Type MIME non supporté: {mime_type}")
+
+        if not file_type:
+            return await message.reply_text("❌ Type de fichier non reconnu")
+
+        menu_text = (
+            f"🛠 <b>Choisissez une action (1 point sera utilisé)</b>\n\n"
+            f"📊 <i>Vos capacités restantes :</i>\n"
+            f"• Fichiers: {remaining_files}/{sub_config['files']}\n"
+            f"• Points: {remaining_points * 30}/{sub_config['pts'] * 30}"
+        )
+
+        await message.reply_text(
+            menu_text,
+            reply_markup=main_menu(),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=message.id
+        )
+        
+
+        task_data = {
+            "uid": user.id,
+            "fid": (
+                message.video.file_id if message.video else
+                message.audio.file_id if message.audio else
+                message.document.file_id if message.document else
+                None
+            ),
+            "qry": {
+                "file_type": file_type,
+                "file_name": file_name,
+                "initial_msg": True,
+                "points_cost": 1
+            },
+            "tms": datetime.datetime.now()
+        }
+        
+        exist = await deps.db.find_existing(user.id, task_data["qry"])
+        print(exist)
+
+        task_id = None 
+        
+        if not exist:
+            task_id = await deps.db.create_task(user.id, task_data["fid"], task_data["qry"])
+            log.info(f"Tâche {task_id} créée pour {user.id}")
+
+        now = datetime.datetime.now()
+        if task_id: 
+            user_info.lst = now
+            await deps.db.save_user(user_info)
+
+
+    except Exception as e:
+        log.error(f"Erreur handle_media {user.id}: {str(e)}", exc_info=True)
+        await message.reply("❌ Erreur système. Veuillez réessayer.")
+        
 @Client.on_callback_query()
 async def handle_callback(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
     user = callback_query.from_user
     msg = callback_query.message
     me = await client.get_me()
+    
     if data == "main_menu":
         await callback_query.edit_message_text(
             "🔧 Sélectionnez une opération :",

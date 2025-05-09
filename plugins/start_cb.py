@@ -1,23 +1,58 @@
+import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
+from bot import Dependencies
+from data.user import Sex, SubType, User
+
+
+deps = Dependencies()
+
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
+    """Gère la commande /start et l'inscription des nouveaux utilisateurs"""
     user = message.from_user
+    await deps.db.connect()
     
+    # Récupérer ou créer l'utilisateur
+    user_info = await deps.db.get_user(user.id)
+    
+    if not user_info:
+        # Nouvel utilisateur
+        new_user = User(
+            uid=user.id,
+            fn=user.first_name,
+            ln=user.last_name or "",
+            un=user.username or ""
+        )
+        
+        try:
+            save = await deps.db.save_user(new_user)
+            if save:
+                fee = await deps.db.update_sub(user.id, SubType.FREE)
+                if fee:
+                    user_info = await deps.db.get_user(user.id)
+            print(f"Nouvel utilisateur enregistré: {user.id}")
+        except Exception as e:
+            print(f"Erreur création utilisateur {user.id}: {e}")
+            await message.reply("❌ Erreur lors de la création de votre profil. Veuillez réessayer.")
+            return
+
     welcome_message = (
         f"<b>👋 Bonjour {user.mention()} !</b>\n\n"
-        "<b>🤖 VideoClient Bot</b> - Solution complète de traitement vidéo avec FFmpeg\n\n"
-        "<b>⚙️ Fonctionnalités principales :</b>\n"
+        f"<b>🤖 VideoClient Bot</b> - Solution complète de traitement vidéo\n"
+        f"<b>🔹 Abonnement:</b> {user_info.sub.value}\n"
+        f"<b>⭐ Points restants:</b> {user_info.tpts}\n\n"
+        "<b>⚙️ Fonctionnalités :</b>\n"
         "• Traitement vidéo professionnel\n"
         "• Gestion audio avancée\n"
-        "• Manipulation des sous-titres\n"
-        "• Chapitrage et métadonnées\n\n"
-        "<b>📤 Envoyez-moi une vidéo ou utilisez les boutons ci-dessous :</b>"
+        "• Manipulation des sous-titres\n\n"
+        "<b>📤 Envoyez-moi une vidéo ou utilisez les boutons :</b>"
     )
     
-    keyboard = InlineKeyboardMarkup([
+    # Clavier interactif
+    buttons = [
         [
             InlineKeyboardButton("📹 Traitement Vidéo", callback_data="video_menu"),
             InlineKeyboardButton("🔊 Gestion Audio", callback_data="audio_menu")
@@ -35,7 +70,12 @@ async def start_command(client: Client, message: Message):
             InlineKeyboardButton("📚 Documentation", url="https://ffmpeg.org/documentation.html"),
             InlineKeyboardButton("🆘 Aide", callback_data="help")
         ]
-    ])
+    ]
+    
+    if user_info.sub == SubType.FREE:
+        buttons.append([InlineKeyboardButton("💎 Passer Premium", callback_data="upgrade_premium")])
+    
+    keyboard = InlineKeyboardMarkup(buttons)
     
     try:
         await message.reply(
@@ -44,8 +84,14 @@ async def start_command(client: Client, message: Message):
             reply_markup=keyboard,
             disable_web_page_preview=True
         )
+        
+        # Mise à jour activité
+        user_info.lst = datetime.datetime.now()
+        await deps.db.save_user(user_info)
+        
     except Exception as e:
-        print(f"Erreur lors de l'envoi du message de bienvenue : {e}")
+        print(f"Erreur envoi message à {user.id}: {e}")
+        await message.reply("❌ Impossible d'afficher l'interface. Veuillez réessayer.")
 
 
 @Client.on_callback_query(filters.regex("^video_menu$"))

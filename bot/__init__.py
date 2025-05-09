@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import TYPE_CHECKING, Optional
 from config import Config
-from data.base import MongoDB
+from data.user import BotDB
 from utils.videoclient import VideoClient
 
 
@@ -13,7 +13,7 @@ class Dependencies:
     def __init__(self):
         self.config = Config()
         
-        self.mongo = MongoDB(self.config.MONGO_URI, "videoclient_log")
+        self.db = BotDB(self.config.MONGO_URI, "video_encoder")
         
         # self.user_manager = UserManager(self.mongo)  
         self.videoclient = VideoClient("test", out_pth="data_encode", trd=100)  
@@ -25,7 +25,7 @@ class Dependencies:
         from bot.bot import Bot  
         
         self.bot = Bot(
-            mongo=self.mongo,
+            mongo=self.db,
             config=self.config,
             videoclient=self.videoclient,
             # usermanager=self.user_manager,
@@ -34,12 +34,12 @@ class Dependencies:
         return self.bot
     
     async def startup(self):
-        await self.mongo.connect()
+        await self.db.connect()
         
     
     async def shutdown(self):
         """Nettoie les ressources."""
         if self.bot:
             await self.bot.stop()
-        await self.mongo.disconnect()
+        await self.db.disconnect()
         self.videoclient.stop()
