@@ -1,57 +1,38 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
+# Définir le répertoire de travail
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    autoconf \
-    automake \
-    build-essential \
-    cmake \
-    git \
-    libass-dev \
-    libfreetype6-dev \
-    libgnutls28-dev \
-    libmp3lame-dev \
-    libtool \
-    libvorbis-dev \
-    libvpx-dev \
-    libx264-dev \
-    libx265-dev \
-    pkg-config \
-    texinfo \
+# Copie des dépendances
+COPY requirements.txt .
+
+# Installation des dépendances système et ffmpeg
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    software-properties-common \
+    gnupg2 \
     wget \
-    yasm \
-    zlib1g-dev \
+    git \
+    build-essential \
     libffi-dev \
     python3-dev \
     libmagic1 \
-    && apt-get clean
+    ca-certificates \
+    && wget -O - https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-64bit-static.tar.xz | tar xJ && \
+    mv ffmpeg-*-static/ffmpeg /usr/local/bin/ && \
+    mv ffmpeg-*-static/ffprobe /usr/local/bin/ && \
+    chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    echo "FFmpeg installed successfully. Version:" && \
+    ffmpeg -version && \
+    apt-get remove --purge -y software-properties-common wget && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/* ffmpeg-*-static
 
-RUN mkdir -v /ffmpeg_sources && \
-    cd /ffmpeg_sources && \
-    git clone --depth 1 --branch n6.0 https://git.ffmpeg.org/ffmpeg.git ffmpeg && \
-    cd ffmpeg && \
-    ./configure \
-      --prefix=/usr/local \
-      --pkg-config-flags="--static" \
-      --enable-gpl \
-      --enable-libx264 \
-      --enable-libx265 \
-      --enable-libvpx \
-      --enable-libmp3lame \
-      --enable-libass \
-      --enable-libfreetype \
-      --enable-nonfree \
-      --enable-shared && \
-    make -j"$(nproc)" && \
-    make install && \
-    hash -r
-
-RUN echo "FFmpeg successfully installed:" && ffmpeg -version
-
-COPY requirements.txt .
+# Installer les dépendances Python
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copier le reste du projet
 COPY . .
 
+# Commande de démarrage
 CMD ["python3", "main.py"]
