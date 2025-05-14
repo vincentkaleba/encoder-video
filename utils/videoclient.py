@@ -371,38 +371,80 @@ class VideoClient:
             
     async def _run_ffmpeg_command(self, command: List[str], timeout: int = 3600) -> bool:
         """
-        Run an FFmpeg command asynchronously with full output logging.
-        
+        Run an FFmpeg command asynchronously with memory usage limitation via ulimit.
+
         Args:
-            command: List of command arguments
-            timeout: Maximum execution time in seconds
-            
+            command: List of FFmpeg command arguments.
+            timeout: Timeout in seconds.
+
         Returns:
-            bool: True if command succeeded, False otherwise
+            True if the command succeeded, False otherwise.
         """
         if not self.running:
             self.logger.warning("FFmpeg command skipped (processor not running)")
             return False
 
-        # Log the complete command being executed
-        self.logger.debug(f"Executing FFmpeg command: {' '.join(shlex.quote(arg) for arg in command)}")
-        
+        def get_system_memory() -> tuple:
+            """Get total memory in MB and current usage percent."""
+            try:
+                import psutil
+                mem = psutil.virtual_memory()
+                return mem.total // (1024 * 1024), mem.percent
+            except ImportError:
+                self.logger.warning("psutil not installed, memory limiting disabled")
+                return 0, 0
+            except Exception as e:
+                self.logger.warning(f"Memory check failed: {str(e)}")
+                return 0, 0
+
         try:
+            total_mem_mb, current_usage = get_system_memory()
+            bash_command = []
+
+            if total_mem_mb > 0:
+                target_mem_mb = int(total_mem_mb * 0.8)
+
+                # Threads option (facultatif)
+                if '-threads' not in command:
+                    command.extend(['-threads', str(self.thread_count)])
+
+                command_str = ' '.join(shlex.quote(arg) for arg in command)
+
+                bash_command = [
+                    'bash', '-c',
+                    f"ulimit -v {target_mem_mb * 1024}; exec {command_str}"
+                ]
+
+                self.logger.info(f"Running FFmpeg with memory cap: {target_mem_mb}MB (80% via ulimit)")
+            else:
+                bash_command = command  # fallback sans ulimit
+
+            self.logger.debug(f"Executing FFmpeg command: {' '.join(bash_command)}")
+
             process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,  # Capture stdout
-                stderr=asyncio.subprocess.PIPE,  # Capture stderr
-                limit=4 * 1024 * 1024  # Increased buffer size
+                *bash_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=4 * 1024 * 1024
             )
+
+            # Memory monitoring task (juste pour log)
+            async def monitor_memory():
+                while process.returncode is None:
+                    _, mem_percent = get_system_memory()
+                    if mem_percent > 85:
+                        self.logger.warning(f"High memory usage detected: {mem_percent}%")
+                    await asyncio.sleep(5)
+
+            monitor_task = asyncio.create_task(monitor_memory())
 
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-                
-                # Decode outputs
+                monitor_task.cancel()
+
                 stdout_str = stdout.decode(errors='ignore').strip()
                 stderr_str = stderr.decode(errors='ignore').strip()
 
-                # Log all output
                 if stdout_str:
                     self.logger.debug(f"FFmpeg stdout:\n{stdout_str}")
                 if stderr_str:
@@ -415,20 +457,20 @@ class VideoClient:
                         f"{error_msg[:1000]}{'...' if len(error_msg) > 1000 else ''}"
                     )
                     return False
-                    
+
                 return True
 
             except asyncio.TimeoutError:
+                monitor_task.cancel()
                 try:
-                    process.terminate()  # Try gentle termination first
+                    process.terminate()
                     await asyncio.wait_for(process.wait(), timeout=5)
                 except:
                     try:
-                        process.kill()  # Force kill if needed
+                        process.kill()
                         await process.wait()
                     except ProcessLookupError:
                         pass
-                        
                 self.logger.warning(f"FFmpeg command timed out after {timeout} seconds")
                 return False
 

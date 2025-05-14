@@ -3240,3 +3240,62 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     shutil.rmtree(user_dir, ignore_errors=True)
             except Exception as e:
                 print(f"Erreur de nettoyage: {str(e)}")
+    
+    elif data == "upgrade_premium":
+        message = (
+            "💎 <b>Choisissez votre abonnement</b>\n\n"
+            "🆓 <u>Gratuit</u>\n"
+            "• 1 point/jour (30/mois)\n"
+            "• 3 fichiers/jour\n"
+            "• Prix: Gratuit\n\n"
+            "🥉 <u>Basic</u> - 4.99$/mois\n"
+            f"• {SUB_CONFIG[SubType.BASIC]['pts']} points/jour ({SUB_CONFIG[SubType.BASIC]['pts']*30}/mois)\n"
+            f"• {SUB_CONFIG[SubType.BASIC]['files']} fichiers/jour\n\n"
+            "🥈 <u>Pro</u> - 14.99$/mois\n"
+            f"• {SUB_CONFIG[SubType.PRO]['pts']} points/jour ({SUB_CONFIG[SubType.PRO]['pts']*30}/mois)\n"
+            f"• {SUB_CONFIG[SubType.PRO]['files']} fichiers/jour\n\n"
+            "🥇 <u>Premium</u> - 29.99$/mois\n"
+            f"• {SUB_CONFIG[SubType.PREM]['pts']} points/jour ({SUB_CONFIG[SubType.PREM]['pts']*30}/mois)\n"
+            f"• {SUB_CONFIG[SubType.PREM]['files']} fichiers/jour"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🥉 Souscrire Basic",
+                    callback_data="confirm_upgrade_BASIC"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🥈 Souscrire Pro",
+                    callback_data="confirm_upgrade_PRO"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🥇 Souscrire Premium",
+                    callback_data="confirm_upgrade_PREM"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔙 Retour",
+                    callback_data="start_back"
+                )
+            ]
+        ])
+
+        if callback_query.message:
+            await callback_query.message.edit_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await callback_query.answer()
+            await callback_query.message.reply_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )

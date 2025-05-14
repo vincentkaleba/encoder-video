@@ -9,6 +9,7 @@ aiofiles
 colorama>=0.4.4
 prompt-toolkit>=3.0.0
 humanize>=4.12.2
+psutil
 
 pyrogram>=2.0.0
 tgcrypto>=1.2.0
