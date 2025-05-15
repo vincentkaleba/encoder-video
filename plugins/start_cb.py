@@ -92,6 +92,12 @@ async def start_command(client: Client, message: Message):
     except Exception as e:
         print(f"Erreur envoi message à {user.id}: {e}")
         await message.reply("❌ Impossible d'afficher l'interface. Veuillez réessayer.")
+    
+    try:
+        await deps.db.disconnect()
+    except Exception as e:
+        print(f"Erreur envoi message à {user.id}: {e}")
+        await message.reply("❌ Impossible d'afficher l'interface. Veuillez réessayer.")
 
 
 @Client.on_callback_query(filters.regex("^video_menu$"))

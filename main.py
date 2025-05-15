@@ -7,6 +7,7 @@ from aiohttp import web
 
 async def main():
     deps = Dependencies()
+    await deps.db.connect()
     
     try:
         await deps.startup()

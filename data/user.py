@@ -264,18 +264,22 @@ class BotDB:
         :return: True si succès
         """
         try:
+            if not user._id:
+                user._id = str(user.uid)
+
             data = user.to_mongo_dict()
-            
+
             res = await self._users.update_one(
-                {"uid": user.uid},
+                {"_id": user._id},
                 {"$set": data},
                 upsert=True
             )
             return res.acknowledged
-            
+
         except Exception as e:
             log.error(f"Erreur save_user {user.uid}: {str(e)}")
             return False
+
 
     async def update_sub(self, uid: int, sub_type: SubType) -> bool:
         """

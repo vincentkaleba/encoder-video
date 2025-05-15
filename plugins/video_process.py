@@ -261,10 +261,14 @@ async def handle_media(client: Client, message: Message):
             user_info.lst = now
             await deps.db.save_user(user_info)
 
-
     except Exception as e:
         log.error(f"Erreur handle_media {user.id}: {str(e)}", exc_info=True)
         await message.reply("❌ Erreur système. Veuillez réessayer.")
+    
+    try:
+        await deps.db.disconnect()
+    except Exception as e:
+        print(f"Erreur envoi message à {user.id}: {e}")
         
 @Client.on_callback_query()
 async def handle_callback(client: Client, callback_query: CallbackQuery):
