@@ -1,5 +1,7 @@
 import asyncio
 import asyncio.subprocess as aio_subproc
+from collections import defaultdict
+import re
 import subprocess
 import shlex
 import json
@@ -13,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Dict, Union, Iterator
+from typing import Any, Optional, List, Dict, Tuple, Union, Iterator
 
 # Optional imports (used when available)
 try:
