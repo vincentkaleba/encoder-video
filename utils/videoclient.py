@@ -1,10 +1,7 @@
 import asyncio
-from asyncio import subprocess
-from collections import defaultdict
-import re
+import asyncio.subprocess as aio_subproc
+import subprocess
 import shlex
-import subprocess 
-import io
 import json
 import logging
 import logging.handlers
@@ -14,110 +11,88 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import Enum
 from pathlib import Path
-import magic 
-from typing import Optional, List, Dict, Tuple, Callable, Union, Any, Iterator
+from typing import Optional, List, Dict, Union, Iterator
 
-
+# Optional imports (used when available)
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 
 class MediaType(Enum):
-    """Enum for different types of video files with proper file extensions."""
     MP4 = "mp4"
     MKV = "mkv"
+    MKA = "mka"
     AVI = "avi"
     MOV = "mov"
-    WMV = "wmv"
-    FLV = "flv"
     WEBM = "webm"
-    MPEG = "mpeg"
-    MPG = "mpg"
-    TS = "ts"
-    M2TS = "m2ts"
-    M4V = "m4v"
-    _3GP = "3gp"
-    OGV = "ogv"
-    ASF = "asf"
-    RMVB = "rmvb"
-    RM = "rm"
-    DAT = "dat"
     MP3 = "mp3"
     AAC = "aac"
     OGG = "ogg"
-    
+
     @classmethod
     def from_extension(cls, ext: str) -> Optional['MediaType']:
-        """Get MediaType from file extension."""
         ext = ext.lower().lstrip('.')
         for member in cls:
             if member.value == ext:
                 return member
         return None
-        
-    def __str__(self) -> str:
-        return self.name
 
 
 class AudioCodec(Enum):
-    """Enum for different audio codecs with descriptions."""
-    AAC = "Advanced Audio Coding"
-    AC3 = "Dolby Digital"
-    EAC3 = "Dolby Digital Plus"
-    DTS = "Digital Theater Systems"
-    DTSHD = "DTS-HD Master Audio"
-    TRUEHD = "Dolby TrueHD"
-    MP3 = "MPEG-1 Audio Layer III"
-    FLAC = "Free Lossless Audio Codec"
-    PCM = "Pulse Code Modulation"
-    OPUS = "Opus"
-    VORBIS = "Vorbis"
-    
-    @property
-    def extension(self) -> str:
-        """Get standard file extension for the audio codec."""
-        return self.name.lower()
-    
-    def __str__(self) -> str:
-        return self.name
+    AAC = "aac"
+    AC3 = "ac3"
+    EAC3 = "eac3"
+    DTS = "dts"
+    MP3 = "mp3"
+    OPUS = "opus"
+    VORBIS = "vorbis"
 
 
 class SubtitleCodec(Enum):
-    """Enum for different subtitle codecs with descriptions."""
-    SRT = "SubRip Subtitle (SRT)"
-    ASS = "Advanced SubStation Alpha (ASS)"
-    SSA = "Advanced SubStation Alpha (SSA)"
-    MOV_TEXT = "Movie Text (MOV_TEXT)"
-    VOBSUB = "VobSub"
-    PGS = "Presentation Graphic Stream (PGS)"
-    TX3G = "Timed Text (TX3G)"
-    WEBVTT = "Web Video Text Tracks (WEBVTT)"
-    TEXT = "Plain Text"
-    SUBRIP = "Subs"
-    
+    SRT = "srt"
+    ASS = "ass"
+    SSA = "ssa"
+    MOV_TEXT = "mov_text"
+    VOBSUB = "vobsub"
+    PGS = "pgs"
+    TX3G = "tx3g"
+    WEBVTT = "webvtt"
+    TEXT = "text"
+    SUBRIP = "subrip"
+
     @property
     def extension(self) -> str:
-        """Get standard file extension for the subtitle codec."""
-        return self.name.lower()
-    
-    def __str__(self) -> str:
-        return self.name
+        # Map logical codec -> reasonable file extension for extraction
+        mapping = {
+            SubtitleCodec.SRT: "srt",
+            SubtitleCodec.ASS: "ass",
+            SubtitleCodec.SSA: "ssa",
+            SubtitleCodec.MOV_TEXT: "ttxt",
+            SubtitleCodec.VOBSUB: "sub",   # vobsub often yields .sub/.idx, use .sub as default
+            SubtitleCodec.PGS: "sup",      # PGS often stored as .sup
+            SubtitleCodec.TX3G: "tx3g",
+            SubtitleCodec.WEBVTT: "vtt",
+            SubtitleCodec.TEXT: "txt",
+            SubtitleCodec.SUBRIP: "srt"
+        }
+        return mapping.get(self, self.name.lower())
 
 
 @dataclass
 class SubtitleTrack:
-    """Class to hold subtitle track information with validation."""
-    index: int
-    language: str  # Should ideally use standard language codes (ISO 639)
+    # `stream_index` is the global ffprobe stream index (use for -map)
+    stream_index: int
+    language: str
     codec: SubtitleCodec
     is_default: bool = False
     is_forced: bool = False
-    stream_type: str = "text"
-    
-    def __post_init__(self):
-        if not isinstance(self.codec, SubtitleCodec):
-            raise ValueError("codec must be a SubtitleCodec enum member")
-            
+    stream_type: str = "text"  # 'text' or 'graphic'
+    container_attachment_index: Optional[int] = None  # if came from an attachment
+
     def __str__(self) -> str:
         flags = []
         if self.is_default:
@@ -125,615 +100,465 @@ class SubtitleTrack:
         if self.is_forced:
             flags.append("forced")
         flag_str = f" ({', '.join(flags)})" if flags else ""
-        return f"Subtitle {self.index}: {self.language} [{self.codec}]{flag_str}"
+        return f"Subtitle stream {self.stream_index}: {self.language} [{self.codec}]{flag_str} type={self.stream_type}"
 
 
 @dataclass
 class AudioTrack:
-    """Class to hold audio track information with validation."""
-    index: int
+    # `stream_index` is the global ffprobe stream index (use for -map)
+    stream_index: int
     language: str
-    codec: AudioCodec
+    codec: Optional[AudioCodec] = None
     channels: int = 2
     is_default: bool = False
-    stream_type: str = "audio"
-    
-    def __post_init__(self):
-        if not isinstance(self.codec, AudioCodec):
-            raise ValueError("codec must be an AudioCodec enum member")
-        if self.channels not in {1, 2, 6, 8}:
-            logging.warning(f"Unusual channel count: {self.channels}")
-            
+
     def __str__(self) -> str:
-        default_flag = " (default)" if self.is_default else ""
-        return f"Audio {self.index}: {self.language} [{self.codec}, {self.channels}ch]{default_flag}"
+        return f"Audio stream {self.stream_index}: {self.language} [{self.codec}] {self.channels}ch"
 
 
 @dataclass
 class MediaFileInfo:
-    """Comprehensive media file information with proper typing and validation."""
     path: Path
-    size: int  # in bytes
-    duration: float  # in seconds
+    size: int
+    duration: float
     media_type: MediaType
     width: int = 0
     height: int = 0
-    bitrate: int = 0  # in kbps
+    bitrate: int = 0
     audio_tracks: List[AudioTrack] = field(default_factory=list)
     subtitle_tracks: List[SubtitleTrack] = field(default_factory=list)
-    
-    def __post_init__(self):
-        if not isinstance(self.path, Path):
-            self.path = Path(self.path)
-        if not isinstance(self.media_type, MediaType):
-            self.media_type = MediaType.from_extension(self.path.suffix) or MediaType.MKV
-            
-    @property
-    def exists(self) -> bool:
-        """Check if the file exists on disk."""
-        return self.path.exists()
-    
-    @property
-    def resolution(self) -> str:
-        """Get resolution as string (e.g., '1920x1080')."""
-        return f"{self.width}x{self.height}" if self.width and self.height else "Unknown"
-    
-    @property
-    def formatted_duration(self) -> str:
-        """Format duration as HH:MM:SS."""
-        hours, remainder = divmod(int(self.duration), 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    
-    @property
-    def formatted_size(self) -> str:
-        """Format size in human-readable format."""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if self.size < 1024.0:
-                return f"{self.size:.2f} {unit}"
-            self.size /= 1024.0
-        return f"{self.size:.2f} TB"
-    
-    # def __str__(self) -> str:
-    #     return (
-    #         f"Media File: {self.path.name}\n"
-    #         f"Type: {self.media_type}\n"
-    #         f"Size: {self.formatted_size}\n"
-    #         f"Duration: {self.formatted_duration}\n"
-    #         f"Resolution: {self.resolution}\n"
-    #         f"Audio Tracks: {len(self.audio_tracks)}\n"
-    #         f"Subtitle Tracks: {len(self.subtitle_tracks)}"
-    #     )
-    
-    def add_audio_track(self, track: AudioTrack) -> None:
-        """Add an audio track with validation."""
-        if not isinstance(track, AudioTrack):
-            raise ValueError("Must provide an AudioTrack object")
-        self.audio_tracks.append(track)
-    
-    def add_subtitle_track(self, track: SubtitleTrack) -> None:
-        """Add a subtitle track with validation."""
-        if not isinstance(track, SubtitleTrack):
-            raise ValueError("Must provide a SubtitleTrack object")
-        self.subtitle_tracks.append(track)
-    
-    def get_default_audio(self) -> Optional[AudioTrack]:
-        """Get the default audio track if available."""
-        for track in self.audio_tracks:
-            if track.is_default:
-                return track
-        return self.audio_tracks[0] if self.audio_tracks else None
-    
-    def get_forced_subtitles(self) -> Iterator[SubtitleTrack]:
-        """Yield all forced subtitle tracks."""
-        return (sub for sub in self.subtitle_tracks if sub.is_forced)
+    attachments: List[Dict] = field(default_factory=list)  # list of {index, filename, mime_type}
+
+    def add_audio_track(self, t: AudioTrack):
+        self.audio_tracks.append(t)
+
+    def add_subtitle_track(self, t: SubtitleTrack):
+        self.subtitle_tracks.append(t)
+
 
 class VideoClient:
-    """Optimized client for video processing with FFmpeg/FFprobe integration."""
-    
-    __slots__ = ['name', 'output_path', 'thread_count', 'ffmpeg_path', 'ffprobe_path',
-                 'executor', 'logger', 'running', '_ffmpeg_version', '_ffprobe_version']
-    
-    def __init__(self, name: str, out_pth: str, trd: int = 5, 
+    __slots__ = ('name', 'output_path', 'thread_count', 'ffmpeg_path', 'ffprobe_path',
+                 'executor', 'logger', 'running', '_ffmpeg_version', '_ffprobe_version')
+
+    def __init__(self, name: str, out_pth: Union[str, Path], trd: int = 4,
                  ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe"):
-        """
-        Initialize the optimized VideoClient.
-        
-        Args:
-            name: Identifier for this client instance
-            out_pth: Output directory path for processed files
-            trd: Number of worker threads (default: 5)
-            ffmpeg: Path to ffmpeg executable (default: "ffmpeg")
-            ffprobe: Path to ffprobe executable (default: "ffprobe")
-        """
         self.name = name
         self.output_path = Path(out_pth)
-        self.thread_count = max(1, min(trd, 20)) 
+        self.thread_count = max(1, min(trd, 32))
         self.ffmpeg_path = ffmpeg
         self.ffprobe_path = ffprobe
         self.running = False
-        self._ffmpeg_version: Optional[str] = None
-        self._ffprobe_version: Optional[str] = None
-        
+        self._ffmpeg_version = None
+        self._ffprobe_version = None
+
         self._setup_output_dir()
-        self.logger = self._setup_optimized_logger()
+        self.logger = self._setup_logger()
         self._verify_ffmpeg()
         self._verify_ffprobe()
         self.executor = ThreadPoolExecutor(max_workers=self.thread_count)
         self._register_signal_handlers()
-        
-        
-    def _setup_output_dir(self) -> None:
-        """Create output directory if it doesn't exist."""
+
+    def _setup_output_dir(self):
         try:
             self.output_path.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise RuntimeError(f"Failed to create output directory: {e}") from e
-        
-    def _setup_optimized_logger(self) -> logging.Logger:
-        """Configure and return an optimized logger instance."""
+        except Exception as e:
+            raise RuntimeError(f"Could not create output directory: {e}")
+
+    def _setup_logger(self):
         logger = logging.getLogger(f"VideoClient_{hash(self.name)}")
-        
         if logger.handlers:
             return logger
-            
         logger.setLevel(logging.INFO)
-        logger.propagate = False  
-        
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
         ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
+        fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        ch.setFormatter(fmt)
         logger.addHandler(ch)
-        
         try:
-            log_file = self.output_path / f"{self.name}.log"
-            fh = logging.handlers.RotatingFileHandler(
-                log_file,
-                maxBytes=5*1024*1024,
-                backupCount=2          
-            )
-            fh.setFormatter(formatter)
+            fh = logging.handlers.RotatingFileHandler(self.output_path / f"{self.name}.log",
+                                                      maxBytes=5 * 1024 * 1024, backupCount=2)
+            fh.setFormatter(fmt)
             logger.addHandler(fh)
-        except IOError as e:
-            logger.warning(f"Could not set up file logging: {e}")
-            
+        except Exception:
+            logger.warning("Could not enable file logging")
         return logger
-        
-    def _verify_ffprobe(self) -> None:
-        """Verify FFprobe installation with minimal resource usage."""
+
+    def _verify_ffprobe(self):
         try:
-            result = subprocess.run(
-                [self.ffprobe_path, "-version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-                timeout=5
-            )
-            self._ffprobe_version = result.stdout.split('\n', 1)[0]
-            self.logger.info(f"FFprobe detected: {self._ffprobe_version}")
-        except subprocess.TimeoutExpired:
-            self.logger.error("FFprobe verification timed out")
-            raise RuntimeError("FFprobe verification failed") from None
+            res = subprocess.run([self.ffprobe_path, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, timeout=5, check=True)
+            self._ffprobe_version = res.stdout.splitlines()[0]
+            self.logger.info(f"ffprobe: {self._ffprobe_version}")
         except Exception as e:
-            self.logger.error(f"FFprobe verification failed: {str(e)}")
-            raise RuntimeError("FFprobe is required for media analysis") from e
-    
+            raise RuntimeError(f"ffprobe not available: {e}")
+
     def _verify_ffmpeg(self):
-            """Verify FFmpeg installation with minimal resource usage."""
-            try:
-                result = subprocess.run(
-                [self.ffmpeg_path, "-version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-                timeout=5
-                )
-                self._ffmpeg_version = result.stdout.split('\n', 1)[0]
-                self.logger.info(f"FFmpeg detected: {self._ffmpeg_version}")
-            except subprocess.TimeoutExpired:
-                self.logger.error("FFmpeg verification timed out")
-                raise RuntimeError("FFmpeg verification failed") from None
-            except Exception as e:
-                self.logger.error(f"FFmpeg verification failed: {str(e)}")
-                raise RuntimeError("FFmpeg is required for media processing") from e   
-                     
-    def _register_signal_handlers(self) -> None:
-        """Register signal handlers for graceful shutdown."""
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
-        
-    def _handle_shutdown(self, signum, frame) -> None:
-        """Handle shutdown signals with minimal processing."""
-        self.logger.info(f"Received shutdown signal {signum}")
+        try:
+            res = subprocess.run([self.ffmpeg_path, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, timeout=5, check=True)
+            self._ffmpeg_version = res.stdout.splitlines()[0]
+            self.logger.info(f"ffmpeg: {self._ffmpeg_version}")
+        except Exception as e:
+            raise RuntimeError(f"ffmpeg not available: {e}")
+
+    def _register_signal_handlers(self):
+        try:
+            signal.signal(signal.SIGINT, self._handle_shutdown)
+            signal.signal(signal.SIGTERM, self._handle_shutdown)
+        except Exception:
+            pass
+
+    def _handle_shutdown(self, signum, frame):
+        self.logger.info(f"Shutdown signal {signum}")
         self.stop()
-    
+
     def start(self):
         if self.running:
-            self.logger.info("VideoClient is already running.")
             return
-        
         self.running = True
-        self.logger.info("VideoClient started.")
-        
+        self.logger.info("VideoClient started")
 
-        
-    def stop(self) -> None:
-        """Clean up resources efficiently."""
-        if self.running:
-            self.running = False
-            self.executor.shutdown(wait=False, cancel_futures=True)
-            self.logger.info("Client shutdown complete")
-            
-    async def _run_ffmpeg_command(self, command: List[str], timeout: int = 3600) -> bool:
+    def stop(self):
+        if not self.running:
+            return
+        self.running = False
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        self.logger.info("VideoClient stopped")
+
+    async def _run_ffmpeg_command(self, command: List[str], timeout: int = 600) -> bool:
         """
-        Run an FFmpeg command asynchronously with optional memory monitoring.
-        
-        Args:
-            command: List of FFmpeg command arguments.
-            timeout: Timeout in seconds.
-    
-        Returns:
-            True if successful, False otherwise.
+        Runs ffmpeg/ffprobe command asynchronously.
+        Returns True on success (exit 0), False otherwise.
         """
         if not self.running:
-            self.logger.warning("FFmpeg command skipped (processor not running)")
-            return False
-    
-        def get_safe_memory_limit() -> int:
-            """Calculate a safe memory limit (25% of total or 2GB min)."""
-            try:
-                import psutil
-                total_mem = psutil.virtual_memory().total
-                # Use 25% of total memory with 2GB floor and 8GB ceiling
-                return min(max(total_mem // 4, 2 * 1024 * 1024), 8 * 1024 * 1024)
-            except Exception:
-                return 0  # Disable limit if detection fails
-    
+            # For convenience allow running commands even if not explicitly started:
+            self.logger.debug("VideoClient not 'started' — running command anyway")
+
+        self.logger.debug("Running command: " + " ".join(shlex.quote(x) for x in command))
         try:
-            # Add threads if not specified
-            if '-threads' not in command and '-threads' not in command:
-                command.extend(['-threads', str(self.thread_count)])
-    
-            mem_limit_kb = get_safe_memory_limit()
-            if mem_limit_kb > 0:
-                self.logger.info(f"Running FFmpeg with memory cap: {mem_limit_kb//1024}MB")
-                # Prepend memory limit using exec to avoid shell=True
-                command = ['bash', '-c', f'ulimit -v {mem_limit_kb}; exec "$0" "$@"', *command]
-    
-            self.logger.debug(f"Executing FFmpeg command: {' '.join(shlex.quote(arg) for arg in command)}")
-    
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                limit=4 * 1024 * 1024
-            )
-    
-            # Memory monitoring (informational only)
-            async def monitor_memory():
-                try:
-                    while process.returncode is None:
-                        await asyncio.sleep(5)
-                        try:
-                            if not hasattr(process, 'pid'):
-                                continue
-                            proc = psutil.Process(process.pid)
-                            mem_info = proc.memory_info()
-                            self.logger.debug(f"FFmpeg memory usage: {mem_info.rss//1024//1024}MB")
-                        except (psutil.NoSuchProcess, ImportError):
-                            break
-                except Exception as e:
-                    self.logger.debug(f"Memory monitoring failed: {str(e)}")
-    
-            monitor_task = asyncio.create_task(monitor_memory())
-    
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-                monitor_task.cancel()
-    
-                if process.returncode != 0:
-                    error_output = stderr.decode(errors='ignore').strip() or stdout.decode(errors='ignore').strip()
-                    self.logger.error(
-                        f"FFmpeg failed (code {process.returncode}): "
-                        f"{error_output[:1000]}{'...' if len(error_output) > 1000 else ''}"
-                    )
-                    return False
-                
-                self.logger.debug("FFmpeg completed successfully")
-                return True
-    
-            except asyncio.TimeoutError:
-                monitor_task.cancel()
-                try:
-                    process.terminate()
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except:
-                    try:
-                        process.kill()
-                        await process.wait()
-                    except ProcessLookupError:
-                        pass
-                self.logger.warning(f"FFmpeg timed out after {timeout}s")
-                return False
-    
-        except FileNotFoundError:
-            self.logger.error("FFmpeg executable not found")
-            return False
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-            return False
-    
-    async def get_media_info(self, file_path: Union[str, Path]) -> Optional[MediaFileInfo]:
-        """
-        Extract detailed media information using FFprobe.
-        
-        Args:
-            file_path: Path to media file
-            
-        Returns:
-            MediaFileInfo object with metadata, or None if analysis fails
-        """
-        path = Path(file_path)
-        if not path.exists():
-            self.logger.error(f"File not found: {file_path}")
-            return None
-            
-        try:
-            stat = path.stat()
-            
-            command = [
-                "ffprobe",
-                "-v", "error",
-                "-show_entries", 
-                "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,channels,bit_rate,tags,disposition",
-                "-show_streams", 
-                "-of", "json",
-                str(path)
-            ]
-            
-            process = await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                self.logger.error(f"FFprobe failed for {path.name}: {stderr.decode().strip()}")
-                return None
-                
-            probe_data = json.loads(stdout.decode())
-            
-            # Create basic MediaFileInfo
-            format_info = probe_data.get('format', {})
-            streams = probe_data.get('streams', [])
-            
-            media_info = MediaFileInfo(
-                path=path,
-                size=int(format_info.get('size', stat.st_size)),
-                duration=float(format_info.get('duration', 0)),
-                media_type=MediaType.from_extension(path.suffix) or MediaType.MKV,
-                bitrate=int(format_info.get('bit_rate', 0)) // 1000 if format_info.get('bit_rate') else 0
-            )
-            
-            # Process video streams
-            video_streams = [s for s in streams if s.get('codec_type') == 'video']
-            if video_streams:
-                video = video_streams[0]  # Take first video stream
-                media_info.width = int(video.get('width', 0))
-                media_info.height = int(video.get('height', 0))
-                if not media_info.bitrate:
-                    media_info.bitrate = int(video.get('bit_rate', 0)) // 1000
-            
-            # Process audio streams
-            audio_index = 0
-            for stream in [s for s in streams if s.get('codec_type') == 'audio']:
-                audio_index += 1
-                codec_name = stream.get('codec_name', '').upper()
+
+            # optional memory monitoring
+            async def monitor():
+                if psutil is None:
+                    return
                 try:
-                    codec = AudioCodec[codec_name]
-                except KeyError:
-                    codec = AudioCodec.AAC  # Default fallback
-                
-                tags = stream.get('tags', {})
-                language = tags.get('language', 'und')  # 'und' for undefined
-                
-                disposition = stream.get('disposition', {})
-                is_default = bool(disposition.get('default'))
-                
-                media_info.add_audio_track(AudioTrack(
-                    index=audio_index,
-                    language=language,
-                    codec=codec,
-                    channels=int(stream.get('channels', 2)),
-                    is_default=is_default
-                ))
-            
-            # Process subtitle streams
-            sub_index = 0
-            for stream in [s for s in streams if s.get('codec_type') == 'subtitle']:
-                sub_index += 1
-                codec_name = stream.get('codec_name', '').upper()
-                try:
-                    codec = SubtitleCodec[codec_name]
-                except KeyError:
-                    # Handle special cases for subtitle codecs
-                    if stream.get('codec_name') == 'hdmv_pgs_subtitle':
-                        codec = SubtitleCodec.PGS
-                    elif stream.get('codec_name') == 'dvd_subtitle':
-                        codec = SubtitleCodec.VOBSUB
-                    else:
-                        codec = SubtitleCodec.SRT  # Default fallback
-                
-                tags = stream.get('tags', {})
-                language = tags.get('language', 'und')
-                
-                disposition = stream.get('disposition', {})
-                is_default = bool(disposition.get('default'))
-                is_forced = bool(disposition.get('forced'))
-                
-                media_info.add_subtitle_track(SubtitleTrack(
-                    index=sub_index,
-                    language=language,
-                    codec=codec,
-                    is_default=is_default,
-                    is_forced=is_forced
-                ))
-            
-            return media_info
-            
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse FFprobe output for {path.name}: {str(e)}")
+                    p = psutil.Process(proc.pid)
+                    while True:
+                        if proc.returncode is not None:
+                            break
+                        mem = p.memory_info().rss // 1024 // 1024
+                        self.logger.debug(f"ffmpeg pid={proc.pid} mem={mem}MB")
+                        await asyncio.sleep(3)
+                except Exception:
+                    return
+
+            mon_task = asyncio.create_task(monitor())
+
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            finally:
+                mon_task.cancel()
+
+            if proc.returncode != 0:
+                err = stderr.decode(errors='ignore').strip() or stdout.decode(errors='ignore').strip()
+                self.logger.debug(f"Command failed (code {proc.returncode}): {err[:800]}")
+                return False
+
+            self.logger.debug("Command succeeded")
+            return True
+
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Command timed out ({timeout}s)")
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False
+        except FileNotFoundError:
+            self.logger.error("Executable not found (check ffmpeg/ffprobe path)")
+            return False
         except Exception as e:
-            self.logger.error(f"Unexpected error analyzing {path.name}: {str(e)}")
-            
-        return None
+            self.logger.error(f"Command exception: {e}", exc_info=True)
+            return False
 
-    def _parse_audio_stream(self, stream: dict) -> AudioTrack:
-        """Helper to parse audio stream data efficiently."""
-        codec_name = stream.get('codec_name', '').lower()
-        codec_map = {
-            'aac': AudioCodec.AAC,
-            'ac3': AudioCodec.AC3,
-            'eac3': AudioCodec.EAC3,
-            'dts': AudioCodec.DTS,
-            'mp3': AudioCodec.MP3,
-            'opus': AudioCodec.OPUS
-        }
-        
-        return AudioTrack(
-            index=(stream.get('audio_tracks', 0)) + 1, 
-            language=stream.get('tags', {}).get('language', 'und'),
-            codec=codec_map.get(codec_name, AudioCodec.AAC),
-            channels=int(stream.get('channels', 2)),  
-            is_default=bool(stream.get('disposition', {}).get('default', False))  
-        )
+    async def get_media_info(self, file_path: Union[str, Path]) -> Optional[MediaFileInfo]:
+        path = Path(file_path)
+        if not path.exists():
+            self.logger.error(f"File not found: {path}")
+            return None
 
+        try:
+            stat = path.stat()
+            cmd = [
+                self.ffprobe_path,
+                "-v", "error",
+                "-show_entries",
+                "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,channels,bit_rate,tags,disposition",
+                "-of", "json",
+                str(path)
+            ]
 
-    def _parse_subtitle_stream(self, stream: dict) -> SubtitleTrack:
-        """Helper to parse subtitle stream data efficiently."""
-        codec_name = stream.get('codec_name', '').lower()
-        codec_map = {
-            'mov_text': SubtitleCodec.MOV_TEXT,
-            'srt': SubtitleCodec.SRT,
-            'hdmv_pgs_subtitle': SubtitleCodec.PGS,
-            'dvd_subtitle': SubtitleCodec.VOBSUB,
-            'subrip': SubtitleCodec.SUBRIP,
-            'ass': SubtitleCodec.ASS,        
-            'ssa': SubtitleCodec.SSA    
-        }
-        
-        disposition = stream.get('disposition', {})
-        
-        return SubtitleTrack(
-            index=stream.get('index', 0) + 1, 
-            language=stream.get('tags', {}).get('language', 'und'),
-            codec=codec_map.get(codec_name, SubtitleCodec.SRT), 
-            is_default=bool(disposition.get('default', False)),
-            is_forced=bool(disposition.get('forced', False))   
-        )
+            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, err = await p.communicate()
+            if p.returncode != 0:
+                self.logger.error(f"ffprobe error: {err.decode().strip()}")
+                return None
 
-    
+            probe = json.loads(out.decode() or "{}")
+            fmt = probe.get("format", {})
+            streams = probe.get("streams", [])
+
+            media = MediaFileInfo(
+                path=path,
+                size=int(fmt.get("size", stat.st_size)),
+                duration=float(fmt.get("duration", 0) or 0),
+                media_type=MediaType.from_extension(path.suffix) or MediaType.MKV,
+                bitrate=(int(fmt.get("bit_rate")) // 1000) if fmt.get("bit_rate") else 0
+            )
+
+            # Video -> width/height
+            vs = [s for s in streams if s.get('codec_type') == 'video']
+            if vs:
+                v = vs[0]
+                media.width = int(v.get("width", 0) or 0)
+                media.height = int(v.get("height", 0) or 0)
+                if not media.bitrate and v.get("bit_rate"):
+                    media.bitrate = int(v.get("bit_rate")) // 1000
+
+            # Audio streams
+            for s in [s for s in streams if s.get('codec_type') == 'audio']:
+                si = int(s.get('index', 0))
+                codec_name = (s.get('codec_name') or "").lower()
+                codec_enum = None
+                try:
+                    codec_enum = AudioCodec(codec_name)
+                except Exception:
+                    # fallback None
+                    codec_enum = None
+                tags = s.get('tags') or {}
+                lang = tags.get('language', 'und')
+                disp = s.get('disposition') or {}
+                at = AudioTrack(stream_index=si, language=lang, codec=codec_enum,
+                                channels=int(s.get('channels', 2) or 2),
+                                is_default=bool(disp.get('default')))
+                media.add_audio_track(at)
+
+            # Attachment streams (e.g., attachments including .mka files)
+            for s in [s for s in streams if s.get('codec_type') == 'attachment']:
+                si = int(s.get('index', 0))
+                tags = s.get('tags') or {}
+                filename = tags.get('filename', '')
+                mime = tags.get('mimetype', '')
+                media.attachments.append({'index': si, 'filename': filename, 'mimetype': mime})
+
+            # Subtitle streams (use global stream index!)
+            for s in [s for s in streams if s.get('codec_type') == 'subtitle']:
+                si = int(s.get('index', 0))
+                codec_name = (s.get('codec_name') or "").lower()
+                # determine codec & type
+                if codec_name in ('hdmv_pgs_subtitle',):
+                    codec = SubtitleCodec.PGS
+                    s_type = 'graphic'
+                elif codec_name in ('dvd_subtitle',):
+                    codec = SubtitleCodec.VOBSUB
+                    s_type = 'graphic'
+                elif codec_name in ('ass',):
+                    codec = SubtitleCodec.ASS
+                    s_type = 'text'
+                elif codec_name in ('ssa',):
+                    codec = SubtitleCodec.SSA
+                    s_type = 'text'
+                elif codec_name in ('mov_text', 'tx3g', 'webvtt'):
+                    codec = SubtitleCodec.MOV_TEXT
+                    s_type = 'text'
+                elif codec_name in ('srt', 'subrip'):
+                    codec = SubtitleCodec.SRT
+                    s_type = 'text'
+                else:
+                    # fallback
+                    codec = SubtitleCodec.SRT
+                    s_type = 'text'
+
+                tags = s.get('tags') or {}
+                lang = tags.get('language', 'und')
+                disp = s.get('disposition') or {}
+                sub = SubtitleTrack(stream_index=si, language=lang, codec=codec,
+                                    is_default=bool(disp.get('default')), is_forced=bool(disp.get('forced')),
+                                    stream_type=s_type)
+                media.add_subtitle_track(sub)
+
+            return media
+        except Exception as e:
+            self.logger.error(f"get_media_info failure: {e}", exc_info=True)
+            return None
+
+    async def _analyze_attachment(self, main_file: Path, attach_stream_index: int) -> Optional[MediaFileInfo]:
+        """
+        Extract an attachment stream (e.g., .mka) to a temp file and analyze it.
+        attach_stream_index is the global ffprobe index of the attachment.
+        """
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".mka", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+
+            # map by global stream index
+            cmd = [
+                self.ffmpeg_path,
+                "-i", str(main_file),
+                "-map", f"0:{attach_stream_index}",
+                "-c", "copy",
+                "-y", str(tmp_path)
+            ]
+            ok = await self._run_ffmpeg_command(cmd, timeout=120)
+            if not ok:
+                self.logger.error("Failed to extract attachment to temp file")
+                return None
+
+            info = await self.get_media_info(tmp_path)
+            return info
+        except Exception as e:
+            self.logger.error(f"_analyze_attachment error: {e}", exc_info=True)
+            return None
+        finally:
+            # remove temp file if exists
+            try:
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     async def extract_subtitles(self, input_path: Union[str, Path],
-                            output_dir: Union[str, Path] = None) -> List[Path]:
+                                output_dir: Union[str, Path] = None) -> List[Path]:
         """
-        Extract all subtitles from a video file with optimized resource usage.
-        
-        Args:
-            input_path: Path to input video file
-            output_dir: Directory to save subtitles (uses client output path if None)
-            
-        Returns:
-            List of Paths to extracted subtitle files or empty list on failure
+        Extract subtitles from a file. Handles:
+         - subtitles directly in the file
+         - attachments (e.g., .mka) attached in the file that contain subtitles
+        Returns list of extracted file paths.
         """
-        try:
-            # Convert and validate paths
-            input_path = Path(input_path)
-            self.logger.debug(f"Starting subtitle extraction from: {input_path}")
-            
-            if not input_path.exists():
-                self.logger.error(f"Input file does not exist: {input_path}")
-                return []
-                
-            output_dir = Path(output_dir) if output_dir else self.output_path
-            self.logger.debug(f"Output directory set to: {output_dir}")
+        input_path = Path(input_path)
+        if not input_path.exists():
+            self.logger.error("Input not found")
+            return []
 
+        outdir = Path(output_dir) if output_dir else self.output_path
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        # gather media info
+        media = await self.get_media_info(input_path)
+        if not media:
+            self.logger.error("Could not analyze input")
+            return []
+
+        extracted: List[Path] = []
+
+        # If attachment .mka present, analyze it and import its subtitle streams (if any)
+        for attach in media.attachments:
+            filename = attach.get('filename', '') or ''
+            if filename.lower().endswith('.mka') or filename.lower().endswith('.mkv'):
+                self.logger.info(f"Found attachment {filename} at stream {attach.get('index')}; analyzing...")
+                nested = await self._analyze_attachment(input_path, attach.get('index'))
+                if nested and nested.subtitle_tracks:
+                    # we need to mark these tracks as coming from that attachment (so we can extract later)
+                    for sub in nested.subtitle_tracks:
+                        # mark container_attachment_index with attachment stream index
+                        sub.container_attachment_index = attach.get('index')
+                        # adjust path (we'll extract from the temp mka, not directly from original)
+                        media.add_subtitle_track(sub)
+
+        # If still no subtitle stream, check audio tracks maybe referencing embedded container (less common)
+        if not media.subtitle_tracks:
+            self.logger.info("No subtitle streams found in top-level stream list")
+
+        # Prepare extraction tasks: use stream_index for mapping (-map 0:STREAM_INDEX)
+        tasks = []
+        for sub in media.subtitle_tracks:
             try:
-                output_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                self.logger.error(f"Failed to create output directory {output_dir}: {str(e)}")
-                return []
+                # If sub came from an attachment, we will later extract the attachment to tmp and call extract_subtitles on it.
+                if sub.container_attachment_index is not None:
+                    # postpone extraction via extract_subtitles_from_attachment
+                    continue
 
-            # Get media info with error handling
-            try:
-                media_info = await self.get_media_info(input_path)
-                print(media_info.subtitle_tracks)
-                if not media_info:
-                    self.logger.warning(f"Could not get media info for: {input_path}")
-                    return []
-                    
-                self.logger.debug(f"Found {len(media_info.subtitle_tracks)} subtitle tracks")
-                
-                if not media_info.subtitle_tracks:
-                    self.logger.info(f"No subtitles found in {input_path}")
-                    return []
-            except Exception as e:
-                self.logger.error(f"Error analyzing media file: {str(e)}", exc_info=True)
-                return []
-
-            extracted_files = []
-            base_name = input_path.stem
-            tasks = []
-            
-            self.logger.debug(f"Preparing subtitle extraction tasks...")
-            
-            # Prepare all extraction commands
-            for sub in media_info.subtitle_tracks:
-                try:
-                    output_path = output_dir / f"{base_name}_{sub.language}_{sub.index}.{sub.codec.extension}"
-                    command = [
+                stream_idx = sub.stream_index
+                base = input_path.stem
+                if sub.stream_type == 'text':
+                    out_ext = "srt"
+                    out_path = outdir / f"{base}_{sub.language}_{stream_idx}.{out_ext}"
+                    cmd = [
                         self.ffmpeg_path,
                         "-i", str(input_path),
-                        "-map", f"0:s:{sub.index-1}",
-                        "-c:s", "copy",
-                        "-y",
-                        str(output_path)
+                        "-map", f"0:{stream_idx}",
+                        "-c:s", "srt",  # transcode text-like subs to srt when possible
+                        "-y", str(out_path)
                     ]
-                    tasks.append((command, output_path))
-                    self.logger.debug(f"Prepared extraction for track {sub.index} ({sub.language}) -> {output_path}")
-                except Exception as e:
-                    self.logger.error(f"Error preparing extraction for track {sub.index}: {str(e)}")
+                else:
+                    # graphic subtitle, cannot transcode to srt automatically: copy to .sup/.sub
+                    out_ext = sub.codec.extension
+                    out_path = outdir / f"{base}_{sub.language}_{stream_idx}.{out_ext}"
+                    cmd = [
+                        self.ffmpeg_path,
+                        "-i", str(input_path),
+                        "-map", f"0:{stream_idx}",
+                        "-c:s", "copy",
+                        "-y", str(out_path)
+                    ]
+                tasks.append((cmd, out_path))
+            except Exception as e:
+                self.logger.error(f"Preparing extraction for stream {sub.stream_index} failed: {e}")
 
-            # Execute all extraction commands
-            for command, output_path in tasks:
-                try:
-                    self.logger.debug(f"Executing: {' '.join(command)}")
-                    
-                    if await self._run_ffmpeg_command(command, timeout=120):
-                        extracted_files.append(output_path)
-                        self.logger.debug(f"Successfully extracted subtitle: {output_path}")
-                    else:
-                        self.logger.warning(f"Failed to extract subtitle to {output_path}")
-                except Exception as e:
-                    self.logger.error(f"Error during subtitle extraction: {str(e)}", exc_info=True)
-
-            if extracted_files:
-                self.logger.info(f"Successfully extracted {len(extracted_files)}/{len(tasks)} subtitles from {input_path}")
+        # Execute extraction tasks sequentially (safe). Could be parallelized with limits if desired.
+        for cmd, out_path in tasks:
+            ok = await self._run_ffmpeg_command(cmd, timeout=120)
+            if ok and out_path.exists():
+                extracted.append(out_path)
+                self.logger.info(f"Extracted subtitle to {out_path}")
             else:
-                self.logger.warning(f"No subtitles were successfully extracted from {input_path}")
+                # Even if ffmpeg exits 0, sometimes output file is not created; check and log
+                if out_path.exists():
+                    extracted.append(out_path)
+                    self.logger.info(f"Extracted subtitle to {out_path}")
+                else:
+                    self.logger.warning(f"Failed to extract subtitle to {out_path}")
 
-            return extracted_files
+        # Now handle subtitle tracks that came from attachments: extract the attachment to temp and re-run extraction
+        for sub in [s for s in media.subtitle_tracks if s.container_attachment_index is not None]:
+            att_idx = sub.container_attachment_index
+            if att_idx is None:
+                continue
+            self.logger.info(f"Extracting attachment (index {att_idx}) to obtain subtitle stream {sub.stream_index}")
+            # create temp mka and extract attachment
+            tmp_mka = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".mka", delete=False) as tmpf:
+                    tmp_mka = Path(tmpf.name)
 
-        except Exception as e:
-            self.logger.error(f"Unexpected error in subtitle extraction: {str(e)}", exc_info=True)
-            return []
+                # Extract attachment to tmp_mka by global stream index att_idx
+                cmd_extract_att = [
+                    self.ffmpeg_path,
+                    "-i", str(input_path),
+                    "-map", f"0:{att_idx}",
+                    "-c", "copy",
+                    "-y", str(tmp_mka)
+                ]
+                if not await self._run_ffmpeg_command(cmd_extract_att, timeout=120):
+                    self.logger.error(f"Failed to extract attachment stream {att_idx}")
+                    continue
+
+                # Now call extract_subtitles on tmp_mka (recursive, but tmp_mka should contain straightforward subs)
+                found = await self.extract_subtitles(tmp_mka, outdir)
+                extracted.extend(found)
+            finally:
+                try:
+                    if tmp_mka and tmp_mka.exists():
+                        tmp_mka.unlink()
+                except Exception:
+                    pass
+
+        return extracted
 
     async def convert_audio(self, input_path: Union[str, Path],
                         output_name: str,
