@@ -108,7 +108,7 @@ class SubtitleTrack:
 @dataclass
 class AudioTrack:
     # `stream_index` is the global ffprobe stream index (use for -map)
-    stream_index: int
+    index: int
     language: str
     codec: Optional[AudioCodec] = None
     channels: int = 2
