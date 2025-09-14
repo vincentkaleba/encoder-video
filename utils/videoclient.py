@@ -85,15 +85,39 @@ class SubtitleCodec(Enum):
 
 
 @dataclass
+class AudioTrack:
+    # `stream_index` est l'index global ffprobe (utilisé pour -map)
+    stream_index: int
+    language: str
+    codec: Optional[AudioCodec] = None
+    channels: int = 2
+    is_default: bool = False
+    # Ajout de l'attribut index optionnel
+    index: int = field(init=False)
+
+    def __post_init__(self):
+        # Initialiser index avec la même valeur que stream_index
+        self.index = self.stream_index
+
+    def __str__(self) -> str:
+        return f"Audio stream {self.stream_index}: {self.language} [{self.codec}] {self.channels}ch"
+
+@dataclass
 class SubtitleTrack:
-    # `stream_index` is the global ffprobe stream index (use for -map)
+    # `stream_index` est l'index global ffprobe (utilisé pour -map)
     stream_index: int
     language: str
     codec: SubtitleCodec
     is_default: bool = False
     is_forced: bool = False
-    stream_type: str = "text"  # 'text' or 'graphic'
-    container_attachment_index: Optional[int] = None  # if came from an attachment
+    stream_type: str = "text"  # 'text' ou 'graphic'
+    container_attachment_index: Optional[int] = None  # si provenant d'une pièce jointe
+    # Ajout de l'attribut index optionnel
+    index: int = field(init=False)
+
+    def __post_init__(self):
+        # Initialiser index avec la même valeur que stream_index
+        self.index = self.stream_index
 
     def __str__(self) -> str:
         flags = []
@@ -103,20 +127,6 @@ class SubtitleTrack:
             flags.append("forced")
         flag_str = f" ({', '.join(flags)})" if flags else ""
         return f"Subtitle stream {self.stream_index}: {self.language} [{self.codec}]{flag_str} type={self.stream_type}"
-
-
-@dataclass
-class AudioTrack:
-    # `stream_index` is the global ffprobe stream index (use for -map)
-    index: int
-    language: str
-    codec: Optional[AudioCodec] = None
-    channels: int = 2
-    is_default: bool = False
-
-    def __str__(self) -> str:
-        return f"Audio stream {self.stream_index}: {self.language} [{self.codec}] {self.channels}ch"
-
 
 @dataclass
 class MediaFileInfo:
