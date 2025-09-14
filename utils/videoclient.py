@@ -92,11 +92,10 @@ class AudioTrack:
     codec: Optional[AudioCodec] = None
     channels: int = 2
     is_default: bool = False
-    # Ajout de l'attribut index optionnel
     index: int = field(init=False)
+    stream_type: str = "audio"
 
     def __post_init__(self):
-        # Initialiser index avec la même valeur que stream_index
         self.index = self.stream_index
 
     def __str__(self) -> str:
@@ -112,7 +111,6 @@ class SubtitleTrack:
     is_forced: bool = False
     stream_type: str = "text"  # 'text' ou 'graphic'
     container_attachment_index: Optional[int] = None  # si provenant d'une pièce jointe
-    # Ajout de l'attribut index optionnel
     index: int = field(init=False)
 
     def __post_init__(self):
